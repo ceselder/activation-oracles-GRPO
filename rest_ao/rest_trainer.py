@@ -104,11 +104,22 @@ class RESTTrainer:
 
         # Get the hook submodule - for PEFT models, access through base_model.model
         # Hook at layer 1 for activation injection
+        # Handle different model architectures (Qwen uses .model.layers, Gemma3 uses .language_model.layers)
         base_model = self.model.base_model.model
-        self.submodule = base_model.model.layers[self.cfg.hook_layer]
+        if hasattr(base_model, 'language_model'):
+            # Gemma 3 multimodal structure
+            layers = base_model.language_model.layers
+        elif hasattr(base_model, 'model') and hasattr(base_model.model, 'layers'):
+            # Qwen/Llama structure
+            layers = base_model.model.layers
+        else:
+            # Try direct layers access
+            layers = base_model.layers
+
+        self.submodule = layers[self.cfg.hook_layer]
 
         # Store layer accessor for activation extraction
-        self._get_layer = lambda l: base_model.model.layers[l]
+        self._get_layer = lambda l: layers[l]
 
         # Question generator (uses base model without LoRA) - BATCHED
         self.question_generator = QuestionGenerator(

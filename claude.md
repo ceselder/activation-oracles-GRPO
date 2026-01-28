@@ -1,5 +1,7 @@
 # GRPO Activation Oracle - Calibration Training
 
+**CRITICAL: NEVER switch to Qwen3-1.7B. Always use Qwen3-8B. Use gradient checkpointing or quantization if OOM.**
+
 ## Quick Resume Context
 
 **Dataset:** `ceselder/wildchat-oracle-questions` (1000 prompts, 8k questions)

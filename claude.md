@@ -208,6 +208,31 @@ Layer: {number}
 
 ---
 
+## WildChat Oracle Questions Dataset
+
+**Script**: `fetch_wildchat_questions.py`
+**Model**: `google/gemini-2.5-flash-lite` via OpenRouter
+**Output**: `datasets/wildchat_oracle_questions.jsonl`
+**HuggingFace**: https://huggingface.co/datasets/ceselder/wildchat-oracle-questions
+
+### Results
+- 1000 examples (user prompt + oracle questions)
+- 7997 total oracle questions
+- 52.7% binary (yes/no), 47.3% open-ended
+- ~50% negative questions (probing wrong topics/emotions)
+- **Cost: $0.0563** (5.6 cents for 1000 examples)
+
+### Format
+```json
+{
+  "wildchat_question": "user message...",
+  "language": "english",
+  "oracle_questions": ["What is the model thinking about?", "Is this about cooking?", ...]
+}
+```
+
+---
+
 ## Resources
 
 - Paper: https://arxiv.org/abs/2512.15674

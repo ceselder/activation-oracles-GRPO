@@ -1,0 +1,237 @@
+"""Judge module for informativeness scoring.
+
+Uses an external LLM (via OpenRouter) to score oracle answers on a 0-1 scale
+for informativeness and correctness.
+"""
+
+import os
+import re
+import asyncio
+from dataclasses import dataclass
+from typing import Sequence
+
+from openai import AsyncOpenAI
+
+from rest_ao.config import JUDGE_PROMPT
+
+
+@dataclass
+class JudgeResult:
+    """Result from judging a single oracle answer."""
+
+    informativeness: float
+    raw_response: str
+    parse_success: bool
+
+
+def _parse_score(response: str) -> float | None:
+    """Parse a 0-1 score from judge response."""
+    response = response.strip()
+
+    # Try direct float parse first
+    try:
+        score = float(response)
+        if 0.0 <= score <= 1.0:
+            return score
+    except ValueError:
+        pass
+
+    # Try to find a decimal number in the response
+    match = re.search(r"([01]\.?\d*)", response)
+    if match:
+        try:
+            score = float(match.group(1))
+            if 0.0 <= score <= 1.0:
+                return score
+        except ValueError:
+            pass
+
+    return None
+
+
+class InformativenessJudge:
+    """Judge that scores oracle answers for informativeness."""
+
+    def __init__(
+        self,
+        model: str = "qwen/qwen-2.5-72b-instruct",
+        temperature: float = 0.0,
+        api_key: str | None = None,
+        base_url: str = "https://openrouter.ai/api/v1",
+        max_concurrent: int = 50,
+    ):
+        """Initialize the judge.
+
+        Args:
+            model: Model to use via OpenRouter
+            temperature: Generation temperature (0.0 for deterministic)
+            api_key: OpenRouter API key (or set OPENROUTER_API_KEY env var)
+            base_url: API base URL
+            max_concurrent: Max concurrent API calls
+        """
+        self.model = model
+        self.temperature = temperature
+        self.max_concurrent = max_concurrent
+
+        api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("OpenRouter API key required. Set OPENROUTER_API_KEY env var.")
+
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+    async def _score_single(
+        self,
+        prompt: str,
+        question: str,
+        answer: str,
+    ) -> JudgeResult:
+        """Score a single oracle answer."""
+        judge_prompt = JUDGE_PROMPT.format(
+            prompt=prompt,
+            question=question,
+            answer=answer,
+        )
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": judge_prompt}],
+                temperature=self.temperature,
+                max_tokens=10,
+            )
+            raw = response.choices[0].message.content or ""
+            score = _parse_score(raw)
+
+            if score is not None:
+                return JudgeResult(
+                    informativeness=score,
+                    raw_response=raw,
+                    parse_success=True,
+                )
+            else:
+                # Default to 0.3 for unparseable responses (slight penalty)
+                return JudgeResult(
+                    informativeness=0.3,
+                    raw_response=raw,
+                    parse_success=False,
+                )
+        except Exception as e:
+            return JudgeResult(
+                informativeness=0.3,
+                raw_response=f"Error: {e}",
+                parse_success=False,
+            )
+
+    async def score_batch(
+        self,
+        prompts: Sequence[str],
+        questions: Sequence[str],
+        answers: Sequence[str],
+    ) -> list[JudgeResult]:
+        """Score a batch of oracle answers.
+
+        Args:
+            prompts: Original text prompts
+            questions: Questions asked
+            answers: Oracle's answers (without epistemic status prefix)
+
+        Returns:
+            List of JudgeResult objects
+        """
+        assert len(prompts) == len(questions) == len(answers)
+
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        async def bounded_score(p, q, a):
+            async with semaphore:
+                return await self._score_single(p, q, a)
+
+        tasks = [
+            bounded_score(p, q, a)
+            for p, q, a in zip(prompts, questions, answers)
+        ]
+
+        return await asyncio.gather(*tasks)
+
+    def score_batch_sync(
+        self,
+        prompts: Sequence[str],
+        questions: Sequence[str],
+        answers: Sequence[str],
+    ) -> list[JudgeResult]:
+        """Synchronous wrapper for score_batch."""
+        return asyncio.run(self.score_batch(prompts, questions, answers))
+
+
+class LocalJudge:
+    """Judge using a local model (same model as oracle, for efficiency)."""
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        device: str = "cuda",
+    ):
+        """Initialize with a loaded model and tokenizer."""
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+
+    def score_batch_sync(
+        self,
+        prompts: Sequence[str],
+        questions: Sequence[str],
+        answers: Sequence[str],
+    ) -> list[JudgeResult]:
+        """Score using the local model."""
+        import torch
+
+        results = []
+
+        for prompt, question, answer in zip(prompts, questions, answers):
+            judge_prompt = JUDGE_PROMPT.format(
+                prompt=prompt,
+                question=question,
+                answer=answer,
+            )
+
+            messages = [{"role": "user", "content": judge_prompt}]
+
+            input_ids = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    input_ids,
+                    max_new_tokens=10,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+
+            response = self.tokenizer.decode(
+                outputs[0][input_ids.shape[1]:],
+                skip_special_tokens=True,
+            )
+
+            score = _parse_score(response)
+            if score is not None:
+                results.append(JudgeResult(
+                    informativeness=score,
+                    raw_response=response,
+                    parse_success=True,
+                ))
+            else:
+                results.append(JudgeResult(
+                    informativeness=0.3,
+                    raw_response=response,
+                    parse_success=False,
+                ))
+
+        return results

@@ -1,0 +1,154 @@
+"""Reward computation for ReST training.
+
+The reward function balances informativeness and calibration:
+    reward = informativeness - λ × (confidence - informativeness)²
+
+Where:
+- informativeness: 0-1 score from judge for how detailed and correct the answer is
+- confidence: parsed epistemic status (0-1)
+- λ: calibration weight (default 0.5)
+
+This prevents exploitation through:
+1. Vague but "correct" answers (low informativeness score)
+2. Overconfident wrong answers (high Brier penalty)
+"""
+
+from dataclasses import dataclass
+
+from rest_ao.epistemic_status import OracleOutput
+
+
+@dataclass
+class RewardResult:
+    """Result of reward computation for a single sample."""
+
+    reward: float
+    informativeness: float
+    confidence: float
+    brier_score: float
+    parse_success: bool
+
+    @property
+    def calibration_error(self) -> float:
+        """Absolute calibration error (confidence - informativeness)."""
+        return abs(self.confidence - self.informativeness)
+
+
+def compute_reward(
+    oracle_output: OracleOutput,
+    informativeness: float,
+    calibration_lambda: float = 0.5,
+) -> RewardResult:
+    """Compute reward for a single oracle response.
+
+    Args:
+        oracle_output: Parsed oracle output with confidence
+        informativeness: Judge's 0-1 score for answer quality
+        calibration_lambda: Weight for calibration penalty (default 0.5)
+
+    Returns:
+        RewardResult with reward and component scores
+    """
+    confidence = oracle_output.confidence
+    brier = (confidence - informativeness) ** 2
+
+    reward = informativeness - calibration_lambda * brier
+
+    return RewardResult(
+        reward=reward,
+        informativeness=informativeness,
+        confidence=confidence,
+        brier_score=brier,
+        parse_success=oracle_output.parse_success,
+    )
+
+
+def compute_batch_rewards(
+    oracle_outputs: list[OracleOutput],
+    informativeness_scores: list[float],
+    calibration_lambda: float = 0.5,
+) -> list[RewardResult]:
+    """Compute rewards for a batch of oracle responses.
+
+    Args:
+        oracle_outputs: List of parsed oracle outputs
+        informativeness_scores: List of judge scores
+        calibration_lambda: Weight for calibration penalty
+
+    Returns:
+        List of RewardResult objects
+    """
+    assert len(oracle_outputs) == len(informativeness_scores)
+
+    return [
+        compute_reward(out, info, calibration_lambda)
+        for out, info in zip(oracle_outputs, informativeness_scores)
+    ]
+
+
+def filter_by_reward(
+    samples: list,
+    rewards: list[RewardResult],
+    filter_bottom_percent: float = 0.2,
+) -> tuple[list, list[RewardResult]]:
+    """Filter out the bottom X% of samples by reward.
+
+    Args:
+        samples: List of samples (any type)
+        rewards: Corresponding reward results
+        filter_bottom_percent: Fraction to remove (e.g., 0.2 = remove bottom 20%)
+
+    Returns:
+        Tuple of (filtered_samples, filtered_rewards)
+    """
+    assert len(samples) == len(rewards)
+
+    if not samples:
+        return [], []
+
+    # Sort by reward
+    paired = list(zip(samples, rewards))
+    paired.sort(key=lambda x: x[1].reward)
+
+    # Remove bottom X%
+    n_remove = int(len(paired) * filter_bottom_percent)
+    filtered = paired[n_remove:]
+
+    if not filtered:
+        # Don't remove everything
+        filtered = paired
+
+    samples_out = [p[0] for p in filtered]
+    rewards_out = [p[1] for p in filtered]
+
+    return samples_out, rewards_out
+
+
+def normalize_rewards_to_weights(
+    rewards: list[RewardResult],
+    min_weight: float = 0.1,
+) -> list[float]:
+    """Convert rewards to training weights normalized to [min_weight, 1.0].
+
+    Args:
+        rewards: List of reward results
+        min_weight: Minimum weight to assign
+
+    Returns:
+        List of weights in [min_weight, 1.0]
+    """
+    if not rewards:
+        return []
+
+    raw = [r.reward for r in rewards]
+    min_r = min(raw)
+    max_r = max(raw)
+
+    if max_r == min_r:
+        return [1.0] * len(rewards)
+
+    # Normalize to [0, 1], then scale to [min_weight, 1.0]
+    normalized = [(r - min_r) / (max_r - min_r) for r in raw]
+    weights = [min_weight + (1.0 - min_weight) * n for n in normalized]
+
+    return weights

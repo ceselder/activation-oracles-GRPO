@@ -24,13 +24,13 @@ class RESTConfig:
     num_prompts: int = 10_000  # Number of prompts to use
     questions_per_prompt: int = 10  # Questions generated per prompt
     question_temperature: float = 1.75  # Very high temp for maximum question diversity
-    question_batch_size: int = 256  # Batch size for question generation (H100 80GB shared)
-    grow_batch_size: int = 256  # Batch size for GROW phase (H100 80GB shared)
-    judge_batch_size: int = 256  # Batch size for SCORE phase (H100 80GB shared)
+    question_batch_size: int = 512  # Batch size for question generation (H100 80GB)
+    grow_batch_size: int = 512  # Batch size for GROW phase (H100 80GB)
+    judge_batch_size: int = 512  # Batch size for SCORE phase (H100 80GB)
 
     # ReST settings
-    num_rest_rounds: int = 50  # Total rounds to run
-    checkpoint_every: int = 5  # Save checkpoint every N rounds
+    num_rest_rounds: int = 10  # Total rounds to run
+    checkpoint_every: int = 2  # Save checkpoint every N rounds
     samples_per_question: int = 3  # Oracle responses sampled per question
     oracle_temperature: float = 1.2  # Higher for diverse samples (was 0.7)
     filter_bottom_percent: float = 0.2  # Remove bottom 20% by reward

@@ -24,14 +24,14 @@ class RESTConfig:
     num_prompts: int = 10_000  # Number of prompts to use
     questions_per_prompt: int = 10  # Questions generated per prompt
     question_temperature: float = 1.75  # Very high temp for maximum question diversity
-    question_batch_size: int = 32  # Batch size for question generation
-    grow_batch_size: int = 32  # Batch size for GROW phase (oracle response generation)
-    judge_batch_size: int = 32  # Batch size for SCORE phase (judging)
+    question_batch_size: int = 128  # Batch size for question generation (A100 80GB can do 256+)
+    grow_batch_size: int = 128  # Batch size for GROW phase (A100 80GB can do 256+)
+    judge_batch_size: int = 128  # Batch size for SCORE phase (A100 80GB can do 256+)
 
     # ReST settings
     num_rest_rounds: int = 5
-    samples_per_question: int = 3  # Oracle responses sampled per question (was 5, reduced for speed)
-    oracle_temperature: float = 0.7
+    samples_per_question: int = 3  # Oracle responses sampled per question
+    oracle_temperature: float = 1.2  # Higher for diverse samples (was 0.7)
     filter_bottom_percent: float = 0.2  # Remove bottom 20% by reward
     calibration_lambda: float = 0.5  # λ in reward formula
 

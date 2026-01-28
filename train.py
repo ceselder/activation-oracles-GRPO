@@ -8,6 +8,16 @@ Usage:
 
 import argparse
 import os
+from pathlib import Path
+
+# Load .env file if it exists
+env_file = Path(__file__).parent / ".env"
+if env_file.exists():
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 # Set environment variables before imports
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"

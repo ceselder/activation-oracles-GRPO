@@ -53,34 +53,24 @@ def load_diverse_prompts(
 
     print(f"Loading {num_prompts} prompts from lmsys-chat-1m...")
 
-    try:
-        ds = load_dataset(
-            "lmsys/lmsys-chat-1m",
-            split="train",
-            streaming=True,
-        )
+    ds = load_dataset(
+        "lmsys/lmsys-chat-1m",
+        split="train",
+        streaming=True,
+    )
 
-        for i, item in enumerate(tqdm(ds, desc="Loading prompts", total=num_prompts * 2)):
-            if len(prompts) >= num_prompts:
-                break
+    for i, item in enumerate(tqdm(ds, desc="Loading prompts", total=num_prompts * 2)):
+        if len(prompts) >= num_prompts:
+            break
 
-            conversation = item.get("conversation", [])
-            for turn in conversation:
-                if turn.get("role") == "user":
-                    content = turn.get("content", "")
-                    if 20 < len(content) <= max_length:
-                        prompts.append(content)
-                        if len(prompts) >= num_prompts:
-                            break
-
-    except Exception as e:
-        print(f"Error loading lmsys-chat-1m: {e}")
-        print("Falling back to simple prompts...")
-        prompts = [
-            "Explain how machine learning works.",
-            "What is the capital of France?",
-            "Write a short story about a robot.",
-        ] * (num_prompts // 3)
+        conversation = item.get("conversation", [])
+        for turn in conversation:
+            if turn.get("role") == "user":
+                content = turn.get("content", "")
+                if 20 < len(content) <= max_length:
+                    prompts.append(content)
+                    if len(prompts) >= num_prompts:
+                        break
 
     random.shuffle(prompts)
     prompts = prompts[:num_prompts]

@@ -753,7 +753,7 @@ class RESTTrainer:
             print(f"Could not save HF dataset: {e}")
 
     def train(self):
-        """Run the full ReST training loop."""
+        """Run the full ReST training loop. Runs infinitely if num_rest_rounds=0."""
         print("Starting ReST training")
 
         # Initialize wandb
@@ -770,9 +770,13 @@ class RESTTrainer:
             seed=self.cfg.seed,
         )
 
-        for round_num in range(self.cfg.num_rest_rounds):
+        round_num = 0
+        infinite = self.cfg.num_rest_rounds == 0
+
+        while infinite or round_num < self.cfg.num_rest_rounds:
+            total_rounds = "∞" if infinite else self.cfg.num_rest_rounds
             print(f"\n{'='*60}")
-            print(f"ReST Round {round_num + 1}/{self.cfg.num_rest_rounds}")
+            print(f"ReST Round {round_num + 1}/{total_rounds}")
             print(f"{'='*60}\n")
 
             # Generate fresh questions each round (BATCHED)
@@ -816,15 +820,18 @@ class RESTTrainer:
                     **eval_metrics,
                 })
 
-            # Save checkpoint
-            save_path = Path(self.cfg.save_dir) / f"round_{round_num}"
-            save_path.mkdir(parents=True, exist_ok=True)
-            self.model.save_pretrained(save_path)
-            print(f"Saved checkpoint to {save_path}")
+            # Save checkpoint every N rounds
+            if (round_num + 1) % self.cfg.checkpoint_every == 0:
+                save_path = Path(self.cfg.save_dir) / f"round_{round_num}"
+                save_path.mkdir(parents=True, exist_ok=True)
+                self.model.save_pretrained(save_path)
+                print(f"Saved checkpoint to {save_path}")
 
             # Clear cache
             gc.collect()
             torch.cuda.empty_cache()
+
+            round_num += 1
 
         print("\nTraining complete!")
         wandb.finish()

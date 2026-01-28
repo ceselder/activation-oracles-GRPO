@@ -12,7 +12,7 @@ class RESTConfig:
     model_name: str = "Qwen/Qwen3-8B"
     oracle_lora_path: str | None = "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B"
     hook_layer: int = 1  # Layer to inject activations (paper uses layer 1)
-    layer_percents: list[int] = field(default_factory=lambda: [25, 50, 75])
+    layer_percents: list[int] = field(default_factory=lambda: [25, 50, 75])  # Extract at multiple depths
 
     # LoRA settings
     lora_r: int = 64
@@ -29,7 +29,8 @@ class RESTConfig:
     judge_batch_size: int = 256  # Batch size for SCORE phase (H100 80GB shared)
 
     # ReST settings
-    num_rest_rounds: int = 5
+    num_rest_rounds: int = 50  # Total rounds to run
+    checkpoint_every: int = 5  # Save checkpoint every N rounds
     samples_per_question: int = 3  # Oracle responses sampled per question
     oracle_temperature: float = 1.2  # Higher for diverse samples (was 0.7)
     filter_bottom_percent: float = 0.2  # Remove bottom 20% by reward

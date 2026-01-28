@@ -104,17 +104,34 @@ class RESTTrainer:
 
         # Get the hook submodule - for PEFT models, access through base_model.model
         # Hook at layer 1 for activation injection
-        # Handle different model architectures (Qwen uses .model.layers, Gemma3 uses .language_model.layers)
+        # Handle different model architectures
         base_model = self.model.base_model.model
-        if hasattr(base_model, 'language_model'):
-            # Gemma 3 multimodal structure
+        print(f"DEBUG: base_model type = {type(base_model)}")
+        print(f"DEBUG: base_model attrs = {[a for a in dir(base_model) if not a.startswith('_')][:20]}")
+
+        # Try different paths to find layers
+        layers = None
+        if hasattr(base_model, 'language_model') and hasattr(base_model.language_model, 'layers'):
+            # Gemma 3 multimodal: base_model.language_model.layers
             layers = base_model.language_model.layers
-        elif hasattr(base_model, 'model') and hasattr(base_model.model, 'layers'):
-            # Qwen/Llama structure
-            layers = base_model.model.layers
-        else:
-            # Try direct layers access
+            print("DEBUG: Found layers at base_model.language_model.layers")
+        elif hasattr(base_model, 'model'):
+            inner = base_model.model
+            print(f"DEBUG: inner model type = {type(inner)}")
+            if hasattr(inner, 'layers'):
+                # Qwen/Llama: base_model.model.layers
+                layers = inner.layers
+                print("DEBUG: Found layers at base_model.model.layers")
+            elif hasattr(inner, 'language_model') and hasattr(inner.language_model, 'layers'):
+                # Gemma 3 via model: base_model.model.language_model.layers
+                layers = inner.language_model.layers
+                print("DEBUG: Found layers at base_model.model.language_model.layers")
+        elif hasattr(base_model, 'layers'):
             layers = base_model.layers
+            print("DEBUG: Found layers at base_model.layers")
+
+        if layers is None:
+            raise RuntimeError(f"Could not find layers in model structure. base_model type: {type(base_model)}")
 
         self.submodule = layers[self.cfg.hook_layer]
 

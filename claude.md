@@ -2,18 +2,20 @@
 
 ## Quick Resume Context
 
-**GPU:** RTX 5090 32GB on vast.ai - `ssh -p 52158 root@72.95.30.202`
+**GPU:** RTX PRO 6000 Blackwell 98GB on vast.ai - `ssh -p 51061 root@72.19.32.135`
 **Model:** Qwen/Qwen3-8B + pretrained AO checkpoint (`adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B`)
 **Data:** lmsys-chat-1m (real user prompts)
 **Repo:** https://github.com/ceselder/rest-activation-oracles
-**VRAM:** ~17GB base, ~19GB during training
+**VRAM:** 98GB available - use batch_size 1024!
 
-**To run training:**
+**To resume training (need to install deps first):**
 ```bash
-ssh -p 52158 root@72.95.30.202
-cd /root/rest-activation-oracles
+ssh -p 51061 root@72.19.32.135
+pip install torch transformers accelerate peft bitsandbytes datasets tqdm wandb openai
+cd /root/rest-activation-oracles && git pull
 export WANDB_API_KEY="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"
-python3 train.py --num_prompts 1000 --num_rounds 3
+export PYTHONPATH=/root/activation_oracles:$PYTHONPATH
+python3 -u train.py --model Qwen/Qwen3-8B --oracle_lora_path adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B --num_prompts 500 --num_rounds 3
 ```
 
 ---
@@ -93,6 +95,25 @@ This prevents:
 - Reward correctly penalizes overconfident wrong answers
 - Training loss: 1.85
 
+### 2026-01-28 (evening): Major Batching Optimizations
+
+**Completed:**
+- [x] Batched question generation (batch_size 1024 for Blackwell)
+- [x] Batched GROW phase (oracle response generation)
+- [x] Batched SCORE phase (LocalJudge with batched generation)
+- [x] 10 varied question templates (2-4 yes/no + 2-4 open-ended, mixed difficulty)
+- [x] Higher temps: question_temp=1.75, oracle_temp=1.2
+- [x] Reduced samples_per_question: 5 → 3
+- [x] Reduced max_new_tokens: 150 → 80
+- [x] Dataset saving after each round (JSON + HuggingFace format)
+- [x] Enhanced wandb logging: reward histograms, pre/post filter metrics
+- [x] Benchmark eval during training (sst2, geometry_of_truth)
+- [x] New GPU: RTX PRO 6000 Blackwell 98GB
+
+**Pending:**
+- [ ] Install deps on new Blackwell GPU
+- [ ] Start full training run with batch_size 1024
+
 ### 2026-01-28: Benchmarks + Training Running
 
 **Completed:**
@@ -163,15 +184,19 @@ Layer: {number}
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Model | Qwen3-1.7B | Fast iteration |
+| Model | Qwen3-8B | Full size with Blackwell 98GB |
 | ReST rounds | 5 | |
-| Samples per question | 5 | |
+| Samples per question | 3 | Reduced for speed |
 | Filter bottom | 20% | |
 | λ (calibration) | 0.5 | Tune if needed |
-| Question temp | 1.1 | High for diversity |
-| Oracle temp | 0.7 | |
+| Question temp | 1.75 | Very high for diversity |
+| Oracle temp | 1.2 | Higher for diverse samples |
 | LoRA rank | 64 | |
 | LR | 1e-5 | |
+| question_batch_size | 1024 | Blackwell 98GB |
+| grow_batch_size | 1024 | Blackwell 98GB |
+| judge_batch_size | 1024 | Blackwell 98GB |
+| max_new_tokens | 80 | Reduced for speed |
 
 ---
 

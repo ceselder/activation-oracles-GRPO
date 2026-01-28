@@ -166,16 +166,12 @@ class GRPOTrainer:
             {"role": "user", "content": prefix + question},
         ]
 
-        encoded = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+        input_ids_list = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors=None
         )
-        if isinstance(encoded, dict):
-            input_ids = encoded["input_ids"].to(self.device)
-        else:
-            input_ids = encoded.to(self.device)
+        input_ids = torch.tensor([input_ids_list], device=self.device)
 
         # Find special token positions
-        input_ids_list = input_ids[0].tolist()
         special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
         positions = [i for i, t in enumerate(input_ids_list) if t == special_token_id][:num_positions]
         if len(positions) != num_positions:
@@ -226,29 +222,21 @@ class GRPOTrainer:
                 {"role": "assistant", "content": response},
             ]
 
-            encoded = self.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=False, return_tensors="pt"
+            full_ids_list = self.tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=False, return_tensors=None
             )
-            if isinstance(encoded, dict):
-                input_ids = encoded["input_ids"].to(self.device)
-            else:
-                input_ids = encoded.to(self.device)
+            input_ids = torch.tensor([full_ids_list], device=self.device)
 
             # Create labels (mask prompt)
-            labels = input_ids.clone()
-            prompt_encoded = self.tokenizer.apply_chat_template(
-                messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors="pt"
+            prompt_ids_list = self.tokenizer.apply_chat_template(
+                messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None
             )
-            if isinstance(prompt_encoded, dict):
-                prompt_ids = prompt_encoded["input_ids"]
-            else:
-                prompt_ids = prompt_encoded
-            labels[0, :prompt_ids.shape[1]] = -100
+            labels = input_ids.clone()
+            labels[0, :len(prompt_ids_list)] = -100
 
             # Find positions for steering
-            input_ids_list = input_ids[0].tolist()
             special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
-            positions = [i for i, t in enumerate(input_ids_list) if t == special_token_id][:num_positions]
+            positions = [i for i, t in enumerate(full_ids_list) if t == special_token_id][:num_positions]
             if len(positions) != num_positions:
                 positions = list(range(num_positions))
 

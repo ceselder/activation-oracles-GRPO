@@ -70,105 +70,109 @@ class RESTConfig:
 
 
 # Question generation templates for Activation Oracle training
-# AO sees only activations (not raw text) and must answer questions about the content
-# Questions should test factual recall, not require external knowledge
-# All templates require English output regardless of input language
-_AO_CONTEXT = """You are generating questions to train an Activation Oracle - a model that answers questions about text using only internal activations (not the raw text).
+# AO answers questions using only model activations (hidden states), not raw text
+# Questions should probe what the model internally represents about the text
+_AO_CONTEXT = """You are generating questions to train an Activation Oracle - a model that answers questions about text using only internal activations (hidden states), not the raw text.
 
-Good questions:
-- Test factual content recall (who, what, where, when)
-- Have clear yes/no or short factual answers
-- Can be answered from the text alone
+Good questions probe what the model internally represents:
+- Topic/theme: "What is this text about?", "Is this related to technology?"
+- User traits: "Does the user seem technical?", "What's the user's likely expertise level?"
+- Sentiment/tone: "Is the tone positive or negative?", "Does the user seem frustrated?"
+- Intent: "Is this a request for help?", "Is this creative writing or factual?"
+- Content: "Is a person mentioned?", "What language is this written in?"
+- Meta: "Is this a short or long message?", "Is there code in this text?"
 
 Bad questions:
-- Require external knowledge or opinions
-- Are vague or philosophical
-- Are not actually questions (statements)
+- Require external knowledge to verify correctness
+- Are too specific (exact quotes, word counts)
+- Are vague or unanswerable
 
+Mix yes/no questions with open-ended ones. All questions MUST be in English.
 """
 
 QUESTION_TEMPLATES = [
     _AO_CONTEXT + """Generate questions about this text:
-- 2-3 yes/no questions (e.g., "Is X mentioned?", "Does the text say Y?")
-- 3-4 factual questions (e.g., "What is X?", "Who did Y?", "Where is Z?")
-IMPORTANT: English only. Must be answerable from the text.
+- 2-3 yes/no questions about topic, sentiment, or user traits
+- 2-3 open-ended questions about theme, intent, or content
+Examples: "Is this about science?", "What is the user asking for?", "Does the user seem upset?"
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Quiz questions for this text:
-- 2-3 yes/no verification questions
-- 2-3 "what/who/where/when" factual questions
-Keep questions simple and directly answerable from the text.
-IMPORTANT: English only.
+    _AO_CONTEXT + """Create questions probing what the model represents:
+- Topic detection: "What subject area is this?", "Is this technical content?"
+- User inference: "Is this likely written by an expert?", "What might the user's goal be?"
+- Sentiment: "What's the emotional tone?", "Is this positive or negative?"
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Create factual recall questions:
-- Yes/no: "Is X true?", "Does Y happen?", "Is Z mentioned?"
-- Open: "What is X?", "Who does Y?", "How many Z?"
-IMPORTANT: English only. No opinions or external knowledge.
+    _AO_CONTEXT + """Write questions about internal representations:
+- Yes/no: "Is this a question?", "Is code mentioned?", "Is the tone formal?"
+- Open: "What topic is this about?", "What does the user want?", "Summarize the intent."
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Write questions testing text comprehension:
-- Binary checks (yes/no answers only)
-- Short-answer factual questions
-Questions must be answerable using only the text content.
-IMPORTANT: English only.
+    _AO_CONTEXT + """Generate questions testing latent knowledge:
+- Theme/topic questions (open-ended)
+- Sentiment/tone questions (yes/no or short answer)
+- User characteristic inference (expertise, mood, intent)
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Generate reading comprehension questions:
-- 2-3 true/false style (answerable yes or no)
-- 2-3 factual retrieval (who, what, where, when, how many)
-IMPORTANT: English only. Clear, unambiguous questions.
+    _AO_CONTEXT + """Create inference questions:
+- "What is the main topic?" (open)
+- "Is this a technical question?" (yes/no)
+- "What does the user want to accomplish?" (open)
+- "Is the user frustrated or satisfied?" (yes/no or short)
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Create questions about the content:
-- Yes/no questions checking specific facts
-- Wh-questions (what/who/where/when) with factual answers
-No philosophical or opinion questions.
-IMPORTANT: English only.
+    _AO_CONTEXT + """Write questions about themes and intent:
+- Topic: "What field/domain is this about?"
+- Intent: "Is this asking for help, information, or something else?"
+- Tone: "How would you describe the sentiment?"
+Mix yes/no with open-ended.
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Write fact-checking questions:
-- "Is it true that X?" (yes/no)
-- "What is the X mentioned?" (factual)
-- "Who/where/when is Y?" (factual)
-IMPORTANT: English only. Text-answerable only.
+    _AO_CONTEXT + """Generate questions a model's activations could answer:
+- "What language is this?"
+- "Is this formal or casual writing?"
+- "What is the user trying to do?"
+- "Is there a question being asked?"
+- "What's the general subject matter?"
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Generate simple comprehension questions:
-- 2-4 yes/no questions about facts in the text
-- 2-4 short-answer questions about details
-IMPORTANT: English only.
+    _AO_CONTEXT + """Create questions about text characteristics:
+- Content type: "Is this code?", "Is this a conversation?"
+- Topic: "What is this about?"
+- User: "What can you infer about who wrote this?"
+- Sentiment: "What's the emotional tone?"
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Create questions a reader could answer:
-- Verification questions (yes/no)
-- Detail questions (specific facts from text)
-Avoid vague or subjective questions.
-IMPORTANT: English only.
+    _AO_CONTEXT + """Write probing questions:
+- Yes/no: topic checks, sentiment checks, format checks
+- Open: theme description, intent summary, user inference
+Avoid questions needing external verification.
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Write clear factual questions:
-- Yes/no: test if specific things are mentioned/true
-- Open: ask for specific details (names, numbers, places)
-IMPORTANT: English only. No external knowledge needed.
+    _AO_CONTEXT + """Generate varied questions:
+- "Is this text about [topic]?" (yes/no)
+- "What is the main theme?" (open)
+- "Does the user seem [trait]?" (yes/no)
+- "What is the user's intent?" (open)
+- "Is the tone [sentiment]?" (yes/no)
 
 TEXT:
 {prompt}""",

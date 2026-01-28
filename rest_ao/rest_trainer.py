@@ -672,6 +672,50 @@ class RESTTrainer:
         self.model.train()
         return metrics
 
+    def save_round_data(
+        self,
+        scored_samples: list[tuple[PromptQuestionPair, str, RewardResult]],
+        round_num: int,
+    ) -> None:
+        """Save all ReST data from this round as a dataset for inspection."""
+        import json
+        from datasets import Dataset
+
+        records = []
+        for pair, response, reward in scored_samples:
+            parsed = parse_oracle_output(response)
+            records.append({
+                "prompt": pair.prompt,
+                "question": pair.question,
+                "layer": pair.layer,
+                "template_idx": pair.template_idx,
+                "oracle_response": response,
+                "parsed_answer": parsed.answer,
+                "confidence": parsed.confidence,
+                "parse_success": parsed.parse_success,
+                "informativeness": reward.informativeness,
+                "brier_score": reward.brier_score,
+                "reward": reward.reward,
+            })
+
+        # Save as JSON
+        save_dir = Path(self.cfg.save_dir) / f"round_{round_num}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        json_path = save_dir / "rest_data.json"
+        with open(json_path, "w") as f:
+            json.dump(records, f, indent=2)
+        print(f"Saved {len(records)} samples to {json_path}")
+
+        # Also save as HuggingFace Dataset
+        try:
+            ds = Dataset.from_list(records)
+            ds_path = save_dir / "rest_dataset"
+            ds.save_to_disk(str(ds_path))
+            print(f"Saved HF dataset to {ds_path}")
+        except Exception as e:
+            print(f"Could not save HF dataset: {e}")
+
     def train(self):
         """Run the full ReST training loop."""
         print("Starting ReST training")
@@ -711,6 +755,9 @@ class RESTTrainer:
 
             # SCORE
             scored = self.score_phase(grow_results)
+
+            # Save dataset for inspection
+            self.save_round_data(scored, round_num)
 
             # IMPROVE
             metrics = self.improve_phase(scored, round_num)

@@ -1,5 +1,23 @@
 # ReST Activation Oracle - Progress Log
 
+## Quick Resume Context
+
+**GPU:** RTX 5090 32GB on vast.ai - `ssh -p 52158 root@72.95.30.202`
+**Model:** Qwen/Qwen3-8B + pretrained AO checkpoint (`adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B`)
+**Data:** lmsys-chat-1m (real user prompts)
+**Repo:** https://github.com/ceselder/rest-activation-oracles
+**VRAM:** ~17GB base, ~19GB during training
+
+**To run training:**
+```bash
+ssh -p 52158 root@72.95.30.202
+cd /root/rest-activation-oracles
+export WANDB_API_KEY="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"
+python3 train.py --num_prompts 1000 --num_rounds 3
+```
+
+---
+
 ## Project Overview
 
 Training a **calibrated Activation Oracle** using **Reinforced Self-Training (ReST)**.

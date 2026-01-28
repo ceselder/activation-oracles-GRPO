@@ -44,17 +44,17 @@ class OracleSample:
 
 def load_diverse_prompts(
     num_prompts: int = 10000,
-    max_length: int = 300,  # ~200 tokens, keeps memory bounded
+    max_length: int = 4096,
     seed: int = 42,
 ) -> list[str]:
-    """Load diverse SHORT prompts from WildChat (real user conversations with GPT)."""
+    """Load diverse user questions from WildChat."""
     random.seed(seed)
     prompts = []
 
-    print(f"Loading {num_prompts} short prompts from WildChat (max {max_length} chars)...")
+    print(f"Loading {num_prompts} prompts from WildChat...")
 
     # Load more than needed so we can shuffle and sample
-    load_target = num_prompts * 5  # Need more since we're filtering short ones
+    load_target = num_prompts * 3
 
     ds = load_dataset(
         "allenai/WildChat-1M",
@@ -69,7 +69,6 @@ def load_diverse_prompts(
         for turn in conversation:
             if turn.get("role") == "user":
                 content = turn.get("content", "").strip()
-                # Only keep short prompts (20-300 chars ~ 5-75 tokens)
                 if 20 < len(content) <= max_length:
                     prompts.append(content)
                     break  # Only first user message per convo
@@ -77,7 +76,7 @@ def load_diverse_prompts(
     # Shuffle and sample
     random.shuffle(prompts)
     prompts = prompts[:num_prompts]
-    print(f"Loaded {len(prompts)} short prompts from WildChat")
+    print(f"Loaded {len(prompts)} prompts from WildChat")
 
     return prompts
 

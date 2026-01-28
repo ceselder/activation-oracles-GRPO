@@ -110,12 +110,13 @@ class RESTTrainer:
         # Store layer accessor for activation extraction
         self._get_layer = lambda l: base_model.model.layers[l]
 
-        # Question generator (uses base model without LoRA)
+        # Question generator (uses base model without LoRA) - BATCHED
         self.question_generator = QuestionGenerator(
             model=self.model,
             tokenizer=self.tokenizer,
             temperature=self.cfg.question_temperature,
             device=str(self.device),
+            batch_size=self.cfg.question_batch_size,
         )
 
         # Judge - use local for efficiency since we have the model loaded
@@ -486,16 +487,16 @@ class RESTTrainer:
             print(f"ReST Round {round_num + 1}/{self.cfg.num_rest_rounds}")
             print(f"{'='*60}\n")
 
-            # Generate fresh questions each round
+            # Generate fresh questions each round (BATCHED)
             print("Generating questions...")
-            pairs = list(create_prompt_question_pairs(
+            pairs = create_prompt_question_pairs(
                 prompts[:1000],  # Use subset per round
                 self.question_generator,
                 self.tokenizer,
                 self.cfg.layer_percents,
                 self.cfg.model_name,
                 questions_per_prompt=self.cfg.questions_per_prompt,
-            ))
+            )
 
             # GROW
             grow_results = self.grow_phase(pairs)

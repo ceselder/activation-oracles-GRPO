@@ -24,6 +24,7 @@ class RESTConfig:
     num_prompts: int = 10_000  # Number of prompts to use
     questions_per_prompt: int = 10  # Questions generated per prompt
     question_temperature: float = 1.1  # High temp for diverse questions
+    question_batch_size: int = 8  # Batch size for question generation
 
     # ReST settings
     num_rest_rounds: int = 5

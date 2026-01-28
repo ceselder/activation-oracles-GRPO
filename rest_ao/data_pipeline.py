@@ -1,8 +1,8 @@
-"""Data pipeline for ReST training.
+"""Data pipeline for ReST training - BATCHED.
 
 Handles:
-1. Loading diverse text prompts (RedPajama/The Pile subsets)
-2. Generating questions with diverse templates
+1. Loading diverse text prompts (lmsys-chat-1m)
+2. Generating questions with diverse templates (BATCHED)
 3. Extracting activations
 4. Creating training samples
 """
@@ -47,20 +47,7 @@ def load_diverse_prompts(
     max_length: int = 1024,
     seed: int = 42,
 ) -> list[str]:
-    """Load diverse user prompts from lmsys-chat-1m.
-
-    Uses real user prompts from the LMSYS Chatbot Arena - actual prompts
-    people sent to various LLMs. This is more representative of real use
-    cases than pretraining data.
-
-    Args:
-        num_prompts: Total number of prompts to load
-        max_length: Maximum character length per prompt
-        seed: Random seed
-
-    Returns:
-        List of user prompts
-    """
+    """Load diverse user prompts from lmsys-chat-1m."""
     random.seed(seed)
     prompts = []
 
@@ -77,12 +64,10 @@ def load_diverse_prompts(
             if len(prompts) >= num_prompts:
                 break
 
-            # Extract user messages from conversation
             conversation = item.get("conversation", [])
             for turn in conversation:
                 if turn.get("role") == "user":
                     content = turn.get("content", "")
-                    # Filter by length
                     if 20 < len(content) <= max_length:
                         prompts.append(content)
                         if len(prompts) >= num_prompts:
@@ -91,7 +76,6 @@ def load_diverse_prompts(
     except Exception as e:
         print(f"Error loading lmsys-chat-1m: {e}")
         print("Falling back to simple prompts...")
-        # Fallback to some basic prompts if dataset fails
         prompts = [
             "Explain how machine learning works.",
             "What is the capital of France?",
@@ -112,27 +96,30 @@ def create_prompt_question_pairs(
     layer_percents: list[int],
     model_name: str,
     questions_per_prompt: int = 10,
-) -> Iterator[PromptQuestionPair]:
-    """Create prompt-question pairs with activation positions.
+) -> list[PromptQuestionPair]:
+    """Create prompt-question pairs with activation positions - BATCHED.
 
     Args:
         prompts: List of text prompts
-        question_generator: Generator for questions
+        question_generator: Generator for questions (uses batched generation)
         tokenizer: Tokenizer for the model
         layer_percents: Layers to sample from (e.g., [25, 50, 75])
         model_name: Model name for layer calculation
         questions_per_prompt: Target questions per prompt
 
-    Yields:
-        PromptQuestionPair objects
+    Returns:
+        List of PromptQuestionPair objects
     """
     from nl_probes.utils.common import layer_percent_to_layer
 
     layers = [layer_percent_to_layer(model_name, p) for p in layer_percents]
 
-    for prompt in tqdm(prompts, desc="Generating questions"):
-        # Generate questions
-        gen_result = question_generator.generate_questions(prompt)
+    # BATCHED question generation - this is the key speedup
+    print(f"Generating questions for {len(prompts)} prompts (batched)...")
+    all_gen_results = question_generator.generate_questions_batch(prompts)
+
+    pairs = []
+    for prompt, gen_result in zip(prompts, all_gen_results):
         questions = gen_result.questions[:questions_per_prompt]
 
         if not questions:
@@ -141,7 +128,7 @@ def create_prompt_question_pairs(
         # Tokenize the prompt for activation extraction
         context_ids = tokenizer.encode(prompt, add_special_tokens=False)
 
-        # Use all positions after some initial context
+        # Use positions after some initial context
         min_offset = max(1, len(context_ids) // 4)
         context_positions = list(range(min_offset, len(context_ids)))
 
@@ -151,11 +138,14 @@ def create_prompt_question_pairs(
         for question in questions:
             layer = random.choice(layers)
 
-            yield PromptQuestionPair(
+            pairs.append(PromptQuestionPair(
                 prompt=prompt,
                 question=question,
                 layer=layer,
                 context_input_ids=context_ids,
                 context_positions=context_positions,
                 template_idx=gen_result.template_idx,
-            )
+            ))
+
+    print(f"Created {len(pairs)} prompt-question pairs")
+    return pairs

@@ -86,9 +86,9 @@ class GRPOTrainer:
         self.model.print_trainable_parameters()
         self.model.enable_input_require_grads()
 
-        # Enable gradient checkpointing to save memory
-        self.model.gradient_checkpointing_enable()
-        print("Gradient checkpointing enabled")
+        # NOTE: Gradient checkpointing conflicts with activation steering hooks
+        # Only enable if OOM and not using hooks during backward pass
+        # self.model.gradient_checkpointing_enable()
 
         # Find layers for activation extraction/injection
         base_model = self.model.base_model.model

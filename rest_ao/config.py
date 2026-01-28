@@ -23,8 +23,8 @@ class RESTConfig:
     # Data settings
     num_prompts: int = 10_000  # Number of prompts to use
     questions_per_prompt: int = 10  # Questions generated per prompt
-    question_temperature: float = 1.1  # High temp for diverse questions
-    question_batch_size: int = 8  # Batch size for question generation
+    question_temperature: float = 1.75  # Very high temp for maximum question diversity
+    question_batch_size: int = 16  # Batch size for question generation (higher = faster)
 
     # ReST settings
     num_rest_rounds: int = 5
@@ -66,84 +66,86 @@ class RESTConfig:
             self.wandb_run_name = f"rest_{model_short}_r{self.num_rest_rounds}"
 
 
-# Question generation templates (10 varied templates as specified in plan)
+# Question generation templates - varied phrasing, 2-4 yes/no + 2-4 open-ended, mixed difficulty
 QUESTION_TEMPLATES = [
-    """Generate questions about this text.
-- 3 yes/no questions (answer must be exactly "yes" or "no")
-- 5 open-ended questions requiring detailed answers
-- 2 questions requiring highly specific, detailed answers
+    """Read this text and create questions of varying types and difficulty:
+- 2-3 binary questions (must be answerable with exactly "yes" or "no")
+- 3-4 open-ended questions (some easy, some requiring careful thought)
+Make each question distinct and interesting.
 
 TEXT:
 {prompt}""",
 
-    """What would someone want to know about this text? Generate:
-- 3 binary questions with clear yes/no answers
-- 5 interpretive questions about meaning or intent
-- 2 questions about specific details or facts
+    """Imagine you're quizzing someone on this passage. Write:
+- A couple quick yes/no checks
+- Several deeper questions that need real explanation
+- At least one tricky question that requires reading between the lines
 
 TEXT:
 {prompt}""",
 
-    """Generate questions to test comprehension of this text:
-- 3 true/false style questions (respond yes or no)
-- 5 "what/why/how" questions
-- 2 questions requiring nuanced, multi-part answers
+    """Create a diverse question set for this text:
+- 2-4 polar questions (yes/no only)
+- 2-4 exploratory questions ranging from straightforward to challenging
+Vary the phrasing and focus of each question.
 
 TEXT:
 {prompt}""",
 
-    """Create questions about this text at different difficulty levels:
-- 3 simple yes/no questions
-- 5 medium-difficulty open questions
-- 2 challenging questions requiring detailed analysis
+    """What would you ask to test understanding? Generate:
+- Some simple verification questions (answerable yes or no)
+- Some interpretive questions requiring elaboration
+- Mix easy and difficult ones
 
 TEXT:
 {prompt}""",
 
-    """Generate diverse questions:
-- 3 questions answerable with yes or no only
-- 5 questions about the main ideas or themes
-- 2 questions about subtle details or implications
+    """Formulate questions about this content:
+- Binary questions for quick fact-checking (2-3)
+- Open questions probing comprehension at different depths (3-4)
+Each question should stand alone and not repeat others.
 
 TEXT:
 {prompt}""",
 
-    """What could we ask about this text?
-- 3 polar questions (yes/no answers)
-- 5 wh-questions (what, who, where, when, why, how)
-- 2 complex questions needing paragraph-length answers
+    """Design a question battery for this text:
+- Include yes/no items to verify basic facts
+- Include wh-questions (what/why/how/who) of varying complexity
+- Range from surface-level to requiring inference
 
 TEXT:
 {prompt}""",
 
-    """Generate questions to probe understanding:
-- 3 yes/no questions about factual content
-- 5 open questions about context or interpretation
-- 2 deep questions requiring inference and detail
+    """Craft questions to explore this passage:
+- A few closed-form queries (yes or no answers only)
+- Several open-ended prompts, some simple, some requiring synthesis
+Write each in a different style.
 
 TEXT:
 {prompt}""",
 
-    """Create a question set:
-- 3 binary choice questions (yes/no format)
-- 5 exploratory questions
-- 2 questions that require synthesizing multiple parts of the text
+    """Generate a mix of question types:
+- 2-4 that can be answered with just "yes" or "no"
+- 2-4 that need fuller responses, varying in difficulty
+Avoid repetitive phrasing.
 
 TEXT:
 {prompt}""",
 
-    """Generate questions at varying specificity:
-- 3 yes/no questions
-- 5 questions with moderate detail expected
-- 2 questions expecting comprehensive, specific answers
+    """Build questions for this text at multiple levels:
+- Factual checks (yes/no format)
+- Analytical questions requiring thought
+- At least one that's genuinely hard
+Make them sound natural and varied.
 
 TEXT:
 {prompt}""",
 
-    """What should we ask about this text?
-- 3 closed questions (yes or no only)
-- 5 open questions about content and meaning
-- 2 detailed questions requiring careful analysis
+    """Survey questions for this content:
+- Quick binary items (yes/no)
+- Deeper probes needing explanation
+- Include both easy wins and real challenges
+Each question should feel fresh.
 
 TEXT:
 {prompt}""",

@@ -21,8 +21,8 @@ class RESTConfig:
     lora_target_modules: str = "all-linear"
 
     # Data settings
-    num_prompts: int = 10_000  # Number of prompts to use
-    questions_per_prompt: int = 10  # Questions generated per prompt
+    num_prompts: int = 100  # Fewer prompts for faster feedback loops
+    questions_per_prompt: int = 20  # More questions per prompt
     question_temperature: float = 1.75  # Very high temp for maximum question diversity
     question_batch_size: int = 32  # Batch size for question generation (variable prompt lengths)
     grow_batch_size: int = 32  # Batch size for GROW phase
@@ -75,104 +75,83 @@ class RESTConfig:
 _AO_CONTEXT = """You are generating questions to train an Activation Oracle - a model that answers questions about text using only internal activations (hidden states), not the raw text.
 
 Good questions probe what the model internally represents:
+- Super open-ended: "What is the model thinking about?", "What are the key themes here?"
 - Topic/theme: "What is this text about?", "Is this related to technology?"
 - User traits: "Does the user seem technical?", "What's the user's likely expertise level?"
 - Sentiment/tone: "Is the tone positive or negative?", "Does the user seem frustrated?"
 - Intent: "Is this a request for help?", "Is this creative writing or factual?"
-- Content: "Is a person mentioned?", "What language is this written in?"
+- Content: "Is a person mentioned?", "What can you infer about the context?"
 - Meta: "Is this a short or long message?", "Is there code in this text?"
 
 Bad questions:
 - Require external knowledge to verify correctness
 - Are too specific (exact quotes, word counts)
-- Are vague or unanswerable
 
+IMPORTANT: Always include at least one super open-ended question like "What is the model thinking about?" or "Describe what this text is about in detail."
 Mix yes/no questions with open-ended ones. All questions MUST be in English.
 """
 
 QUESTION_TEMPLATES = [
-    _AO_CONTEXT + """Generate questions about this text:
-- 2-3 yes/no questions about topic, sentiment, or user traits
-- 2-3 open-ended questions about theme, intent, or content
-Examples: "Is this about science?", "What is the user asking for?", "Does the user seem upset?"
+    _AO_CONTEXT + """Generate 15-20 questions about this text.
+
+MUST INCLUDE:
+- 1-2 super open-ended: "What is the model thinking about?", "Describe the overall content and themes."
+- 3-4 topic/theme questions (mix of yes/no and open)
+- 3-4 user inference questions (expertise, intent, mood)
+- 3-4 sentiment/tone questions
+- 2-3 meta questions (format, style, type of content)
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Create questions probing what the model represents:
-- Topic detection: "What subject area is this?", "Is this technical content?"
-- User inference: "Is this likely written by an expert?", "What might the user's goal be?"
-- Sentiment: "What's the emotional tone?", "Is this positive or negative?"
+    _AO_CONTEXT + """Generate 15-20 diverse questions probing latent representations.
+
+Include:
+- "What is the model thinking about?" (always include this one)
+- "What are the main themes and ideas here?"
+- Topic detection questions
+- User trait inference questions
+- Sentiment analysis questions
+- Content type questions
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Write questions about internal representations:
-- Yes/no: "Is this a question?", "Is code mentioned?", "Is the tone formal?"
-- Open: "What topic is this about?", "What does the user want?", "Summarize the intent."
+    _AO_CONTEXT + """Create 15-20 questions for activation oracle training.
+
+Required question types:
+1. Super open-ended (2-3): "What is this text about in detail?", "What is the model's overall impression?"
+2. Yes/no topic checks (3-4): "Is this about X?", "Does this mention Y?"
+3. User inference (3-4): "What can you infer about the author?", "What's the user's goal?"
+4. Sentiment (3-4): "Is the tone positive?", "Does the user seem frustrated?"
+5. Meta (2-3): "Is this formal writing?", "Is there code?"
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Generate questions testing latent knowledge:
-- Theme/topic questions (open-ended)
-- Sentiment/tone questions (yes/no or short answer)
-- User characteristic inference (expertise, mood, intent)
+    _AO_CONTEXT + """Write 15-20 questions testing what the model internally represents.
+
+Always start with: "What is the model thinking about this text?"
+
+Then add:
+- Open-ended theme questions
+- Yes/no topic verification
+- User characteristic inference
+- Emotional tone analysis
+- Content format questions
 
 TEXT:
 {prompt}""",
 
-    _AO_CONTEXT + """Create inference questions:
-- "What is the main topic?" (open)
-- "Is this a technical question?" (yes/no)
-- "What does the user want to accomplish?" (open)
-- "Is the user frustrated or satisfied?" (yes/no or short)
+    _AO_CONTEXT + """Generate 15-20 activation probing questions.
 
-TEXT:
-{prompt}""",
-
-    _AO_CONTEXT + """Write questions about themes and intent:
-- Topic: "What field/domain is this about?"
-- Intent: "Is this asking for help, information, or something else?"
-- Tone: "How would you describe the sentiment?"
-Mix yes/no with open-ended.
-
-TEXT:
-{prompt}""",
-
-    _AO_CONTEXT + """Generate questions a model's activations could answer:
-- "What language is this?"
-- "Is this formal or casual writing?"
-- "What is the user trying to do?"
-- "Is there a question being asked?"
-- "What's the general subject matter?"
-
-TEXT:
-{prompt}""",
-
-    _AO_CONTEXT + """Create questions about text characteristics:
-- Content type: "Is this code?", "Is this a conversation?"
-- Topic: "What is this about?"
-- User: "What can you infer about who wrote this?"
-- Sentiment: "What's the emotional tone?"
-
-TEXT:
-{prompt}""",
-
-    _AO_CONTEXT + """Write probing questions:
-- Yes/no: topic checks, sentiment checks, format checks
-- Open: theme description, intent summary, user inference
-Avoid questions needing external verification.
-
-TEXT:
-{prompt}""",
-
-    _AO_CONTEXT + """Generate varied questions:
-- "Is this text about [topic]?" (yes/no)
-- "What is the main theme?" (open)
-- "Does the user seem [trait]?" (yes/no)
-- "What is the user's intent?" (open)
-- "Is the tone [sentiment]?" (yes/no)
+Must include these types:
+- "What is the model thinking about?" (required)
+- "Summarize what this text is about" (required)
+- Topic questions (is this about X?)
+- Intent questions (what does the user want?)
+- Sentiment questions (positive/negative/neutral?)
+- Author inference (expert? frustrated? curious?)
 
 TEXT:
 {prompt}""",

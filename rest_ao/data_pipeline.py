@@ -47,11 +47,11 @@ def load_diverse_prompts(
     max_length: int = 4096,
     seed: int = 42,
 ) -> list[str]:
-    """Load diverse user questions from WildChat."""
+    """Load diverse ENGLISH user questions from WildChat."""
     random.seed(seed)
     prompts = []
 
-    print(f"Loading {num_prompts} prompts from WildChat...")
+    print(f"Loading {num_prompts} English prompts from WildChat...")
 
     # Load more than needed so we can shuffle and sample
     load_target = num_prompts * 3
@@ -62,9 +62,12 @@ def load_diverse_prompts(
         streaming=True,
     )
 
-    for item in tqdm(ds, desc="WildChat", total=load_target):
+    for item in tqdm(ds, desc="WildChat (English)", total=load_target):
         if len(prompts) >= load_target:
             break
+        # Filter for English only
+        if item.get("language") != "English":
+            continue
         conversation = item.get("conversation", [])
         for turn in conversation:
             if turn.get("role") == "user":
@@ -76,7 +79,7 @@ def load_diverse_prompts(
     # Shuffle and sample
     random.shuffle(prompts)
     prompts = prompts[:num_prompts]
-    print(f"Loaded {len(prompts)} prompts from WildChat")
+    print(f"Loaded {len(prompts)} English prompts from WildChat")
 
     return prompts
 

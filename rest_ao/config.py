@@ -70,11 +70,13 @@ class RESTConfig:
 
 
 # Question generation templates - varied phrasing, 2-4 yes/no + 2-4 open-ended, mixed difficulty
+# All templates require English output regardless of input language
 QUESTION_TEMPLATES = [
     """Read this text and create questions of varying types and difficulty:
 - 2-3 binary questions (must be answerable with exactly "yes" or "no")
 - 3-4 open-ended questions (some easy, some requiring careful thought)
 Make each question distinct and interesting.
+IMPORTANT: All questions MUST be in English, even if the text is in another language.
 
 TEXT:
 {prompt}""",
@@ -83,6 +85,7 @@ TEXT:
 - A couple quick yes/no checks
 - Several deeper questions that need real explanation
 - At least one tricky question that requires reading between the lines
+IMPORTANT: Write all questions in English only.
 
 TEXT:
 {prompt}""",
@@ -91,6 +94,7 @@ TEXT:
 - 2-4 polar questions (yes/no only)
 - 2-4 exploratory questions ranging from straightforward to challenging
 Vary the phrasing and focus of each question.
+IMPORTANT: Questions must be in English regardless of the text's language.
 
 TEXT:
 {prompt}""",
@@ -99,6 +103,7 @@ TEXT:
 - Some simple verification questions (answerable yes or no)
 - Some interpretive questions requiring elaboration
 - Mix easy and difficult ones
+IMPORTANT: All questions in English only.
 
 TEXT:
 {prompt}""",
@@ -107,6 +112,7 @@ TEXT:
 - Binary questions for quick fact-checking (2-3)
 - Open questions probing comprehension at different depths (3-4)
 Each question should stand alone and not repeat others.
+IMPORTANT: Write questions in English even if the content is not.
 
 TEXT:
 {prompt}""",
@@ -115,6 +121,7 @@ TEXT:
 - Include yes/no items to verify basic facts
 - Include wh-questions (what/why/how/who) of varying complexity
 - Range from surface-level to requiring inference
+IMPORTANT: English questions only.
 
 TEXT:
 {prompt}""",
@@ -123,6 +130,7 @@ TEXT:
 - A few closed-form queries (yes or no answers only)
 - Several open-ended prompts, some simple, some requiring synthesis
 Write each in a different style.
+IMPORTANT: All questions must be written in English.
 
 TEXT:
 {prompt}""",
@@ -131,6 +139,7 @@ TEXT:
 - 2-4 that can be answered with just "yes" or "no"
 - 2-4 that need fuller responses, varying in difficulty
 Avoid repetitive phrasing.
+IMPORTANT: Questions in English only, regardless of input language.
 
 TEXT:
 {prompt}""",
@@ -140,6 +149,7 @@ TEXT:
 - Analytical questions requiring thought
 - At least one that's genuinely hard
 Make them sound natural and varied.
+IMPORTANT: Write all questions in English.
 
 TEXT:
 {prompt}""",
@@ -149,6 +159,7 @@ TEXT:
 - Deeper probes needing explanation
 - Include both easy wins and real challenges
 Each question should feel fresh.
+IMPORTANT: English questions only.
 
 TEXT:
 {prompt}""",

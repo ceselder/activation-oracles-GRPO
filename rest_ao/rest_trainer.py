@@ -119,11 +119,12 @@ class RESTTrainer:
             batch_size=self.cfg.question_batch_size,
         )
 
-        # Judge - use local for efficiency since we have the model loaded
+        # Judge - use local for efficiency since we have the model loaded - BATCHED
         self.judge = LocalJudge(
             model=self.model,
             tokenizer=self.tokenizer,
             device=str(self.device),
+            batch_size=self.cfg.judge_batch_size,
         )
 
         print("Setup complete!")
@@ -241,7 +242,7 @@ class RESTTrainer:
         self,
         pairs: list[PromptQuestionPair],
     ) -> list[tuple[PromptQuestionPair, list[str]]]:
-        """GROW phase: Generate multiple oracle responses per pair.
+        """GROW phase: Generate multiple oracle responses per pair - BATCHED.
 
         Args:
             pairs: List of prompt-question pairs
@@ -249,26 +250,114 @@ class RESTTrainer:
         Returns:
             List of (pair, responses) tuples
         """
-        print(f"GROW phase: Generating {self.cfg.samples_per_question} responses per question")
-        results = []
+        print(f"GROW phase: Generating {self.cfg.samples_per_question} responses per question (batched)")
 
-        for pair in tqdm(pairs, desc="Generating responses"):
-            # Extract activations
+        # Pre-extract all activations
+        print("  Extracting activations...")
+        pair_activations = []
+        for pair in tqdm(pairs, desc="  Extracting activations"):
             acts = self._extract_activations(
                 pair.context_input_ids,
                 pair.context_positions,
                 pair.layer,
             )
+            pair_activations.append(acts)
 
-            # Generate multiple responses
-            responses = []
-            for _ in range(self.cfg.samples_per_question):
-                resp = self._generate_oracle_response(pair, acts)
-                responses.append(resp)
+        # Generate responses in batches
+        results = {i: [] for i in range(len(pairs))}
+        batch_size = self.cfg.grow_batch_size
 
-            results.append((pair, responses))
+        for sample_idx in range(self.cfg.samples_per_question):
+            print(f"  Sample {sample_idx + 1}/{self.cfg.samples_per_question}")
 
-        return results
+            for batch_start in tqdm(range(0, len(pairs), batch_size), desc=f"    Generating"):
+                batch_pairs = pairs[batch_start:batch_start + batch_size]
+                batch_acts = pair_activations[batch_start:batch_start + batch_size]
+
+                # Build batched inputs
+                batch_input_ids = []
+                batch_positions = []
+                batch_vectors = []
+                max_len = 0
+
+                for pair, acts in zip(batch_pairs, batch_acts):
+                    num_positions = acts.shape[0]
+                    prefix = get_introspection_prefix(pair.layer, num_positions)
+
+                    messages = [
+                        {"role": "system", "content": ORACLE_SYSTEM_PROMPT},
+                        {"role": "user", "content": prefix + pair.question},
+                    ]
+
+                    encoded = self.tokenizer.apply_chat_template(
+                        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+                    )
+                    input_ids = encoded["input_ids"][0]
+                    batch_input_ids.append(input_ids)
+                    max_len = max(max_len, len(input_ids))
+
+                    # Find special token positions
+                    input_ids_list = input_ids.tolist()
+                    special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
+                    positions = [i for i, t in enumerate(input_ids_list) if t == special_token_id][:num_positions]
+                    if len(positions) != num_positions:
+                        positions = list(range(num_positions))
+
+                    batch_positions.append(positions)
+                    batch_vectors.append(acts)
+
+                # Left-pad to max length and adjust positions
+                padded_input_ids = []
+                padded_positions = []
+                attention_masks = []
+
+                for input_ids, positions in zip(batch_input_ids, batch_positions):
+                    pad_len = max_len - len(input_ids)
+                    padded = torch.cat([
+                        torch.full((pad_len,), self.tokenizer.pad_token_id, dtype=torch.long),
+                        input_ids
+                    ])
+                    attn_mask = torch.cat([
+                        torch.zeros(pad_len, dtype=torch.long),
+                        torch.ones(len(input_ids), dtype=torch.long)
+                    ])
+                    adjusted_positions = [p + pad_len for p in positions]
+
+                    padded_input_ids.append(padded)
+                    attention_masks.append(attn_mask)
+                    padded_positions.append(adjusted_positions)
+
+                input_ids_tensor = torch.stack(padded_input_ids).to(self.device)
+                attention_mask = torch.stack(attention_masks).to(self.device)
+
+                # Create batched steering hook
+                hook_fn = get_hf_activation_steering_hook(
+                    vectors=batch_vectors,
+                    positions=padded_positions,
+                    steering_coefficient=1.0,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+
+                # Batched generation
+                with add_hook(self.submodule, hook_fn):
+                    outputs = self.model.generate(
+                        input_ids_tensor,
+                        attention_mask=attention_mask,
+                        max_new_tokens=self.cfg.max_new_tokens,
+                        do_sample=True,
+                        temperature=self.cfg.oracle_temperature,
+                        top_p=0.95,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+
+                # Decode responses
+                for i, (pair_idx, _) in enumerate(zip(range(batch_start, batch_start + len(batch_pairs)), batch_pairs)):
+                    generated = outputs[i][input_ids_tensor.shape[1]:]
+                    response = self.tokenizer.decode(generated, skip_special_tokens=True)
+                    results[pair_idx].append(response)
+
+        return [(pair, results[i]) for i, pair in enumerate(pairs)]
 
     def score_phase(
         self,

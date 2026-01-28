@@ -167,18 +167,23 @@ class InformativenessJudge:
 
 
 class LocalJudge:
-    """Judge using a local model (same model as oracle, for efficiency)."""
+    """Judge using a local model (same model as oracle, for efficiency) - BATCHED."""
 
     def __init__(
         self,
         model,
         tokenizer,
         device: str = "cuda",
+        batch_size: int = 16,
     ):
         """Initialize with a loaded model and tokenizer."""
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
+        self.batch_size = batch_size
+
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def score_batch_sync(
         self,
@@ -186,52 +191,83 @@ class LocalJudge:
         questions: Sequence[str],
         answers: Sequence[str],
     ) -> list[JudgeResult]:
-        """Score using the local model."""
+        """Score using the local model - BATCHED."""
         import torch
+        from tqdm import tqdm
 
         results = []
 
-        for prompt, question, answer in zip(prompts, questions, answers):
-            judge_prompt = JUDGE_PROMPT.format(
-                prompt=prompt,
-                question=question,
-                answer=answer,
-            )
+        for batch_start in tqdm(range(0, len(prompts), self.batch_size), desc="Judging"):
+            batch_prompts = prompts[batch_start:batch_start + self.batch_size]
+            batch_questions = questions[batch_start:batch_start + self.batch_size]
+            batch_answers = answers[batch_start:batch_start + self.batch_size]
 
-            messages = [{"role": "user", "content": judge_prompt}]
+            # Build batch inputs
+            batch_input_ids = []
+            max_len = 0
 
-            input_ids = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-            ).to(self.device)
+            for prompt, question, answer in zip(batch_prompts, batch_questions, batch_answers):
+                judge_prompt = JUDGE_PROMPT.format(
+                    prompt=prompt,
+                    question=question,
+                    answer=answer,
+                )
 
+                messages = [{"role": "user", "content": judge_prompt}]
+                encoded = self.tokenizer.apply_chat_template(
+                    messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+                )
+                input_ids = encoded["input_ids"][0]
+                batch_input_ids.append(input_ids)
+                max_len = max(max_len, len(input_ids))
+
+            # Left-pad
+            padded_input_ids = []
+            attention_masks = []
+
+            for input_ids in batch_input_ids:
+                pad_len = max_len - len(input_ids)
+                padded = torch.cat([
+                    torch.full((pad_len,), self.tokenizer.pad_token_id, dtype=torch.long),
+                    input_ids
+                ])
+                attn_mask = torch.cat([
+                    torch.zeros(pad_len, dtype=torch.long),
+                    torch.ones(len(input_ids), dtype=torch.long)
+                ])
+                padded_input_ids.append(padded)
+                attention_masks.append(attn_mask)
+
+            input_ids_tensor = torch.stack(padded_input_ids).to(self.device)
+            attention_mask = torch.stack(attention_masks).to(self.device)
+
+            # Batched generation
             with torch.no_grad():
                 outputs = self.model.generate(
-                    input_ids,
+                    input_ids_tensor,
+                    attention_mask=attention_mask,
                     max_new_tokens=10,
                     do_sample=False,
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
 
-            response = self.tokenizer.decode(
-                outputs[0][input_ids.shape[1]:],
-                skip_special_tokens=True,
-            )
+            # Decode and parse
+            for i in range(len(batch_prompts)):
+                generated = outputs[i][input_ids_tensor.shape[1]:]
+                response = self.tokenizer.decode(generated, skip_special_tokens=True)
 
-            score = _parse_score(response)
-            if score is not None:
-                results.append(JudgeResult(
-                    informativeness=score,
-                    raw_response=response,
-                    parse_success=True,
-                ))
-            else:
-                results.append(JudgeResult(
-                    informativeness=0.3,
-                    raw_response=response,
-                    parse_success=False,
-                ))
+                score = _parse_score(response)
+                if score is not None:
+                    results.append(JudgeResult(
+                        informativeness=score,
+                        raw_response=response,
+                        parse_success=True,
+                    ))
+                else:
+                    results.append(JudgeResult(
+                        informativeness=0.3,
+                        raw_response=response,
+                        parse_success=False,
+                    ))
 
         return results

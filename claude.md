@@ -93,6 +93,38 @@ This prevents:
 - Reward correctly penalizes overconfident wrong answers
 - Training loss: 1.85
 
+### 2026-01-28: Benchmarks + Training Running
+
+**Completed:**
+- [x] Updated `evaluate.py` to use sft.py classification benchmarks
+- [x] Benchmarks use epistemic status format (oracle outputs `[epistemic status: X.XX] Yes/No`)
+- [x] Classification datasets: geometry_of_truth, relations, sst2, md_gender, snli, ag_news, ner, tense, singular_plural
+- [x] Calibration metrics: ECE, Brier, reliability diagrams
+- [x] Training running on GPU (question generation at ~6%, ~25s/prompt unbatched)
+
+**Benchmark Structure:**
+```
+Oracle input: Layer: 18
+             ? ? ? ? ?
+             Answer with 'Yes' or 'No' only. Is this statement true?
+
+Oracle output: [epistemic status: 0.85] Yes
+
+Ground truth: Yes
+Correct: True, Confidence: 0.85
+```
+
+Calibration = mean(|confidence - accuracy|) per bin → ECE
+
+**Known Issues:**
+- Question generation is unbatched (~25s/prompt, bottleneck)
+- Need to implement batched question generation like sft.py's `construct_batch()`
+
+**To run evaluation:**
+```bash
+python evaluate.py --checkpoint checkpoints/round_2 --datasets sst2 geometry_of_truth
+```
+
 ---
 
 ## Architecture Notes

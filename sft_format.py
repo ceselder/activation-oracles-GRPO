@@ -2,13 +2,12 @@
 """SFT to teach the oracle the epistemic status format.
 
 The pre-trained LoRA doesn't know about [epistemic status: XX] format.
-We need to fine-tune it on examples with this format before GRPO.
+We just need to teach the format - capabilities come from RL later.
 
 Strategy:
 1. Generate responses using the pre-trained oracle (no format)
-2. Score them with the judge
-3. Create SFT examples with appropriate confidence levels
-4. Fine-tune for ~200 steps
+2. Wrap with random confidence levels (varied distribution)
+3. Fine-tune for ~200 steps
 """
 
 import argparse
@@ -35,7 +34,6 @@ from transformers import AutoModelForCausalLM
 
 from grpo_ao.config import GRPOConfig
 from grpo_ao.epistemic_status import ORACLE_SYSTEM_PROMPT, format_epistemic_output
-from grpo_ao.judge import InformativenessJudge
 
 import sys
 for path in [
@@ -49,6 +47,24 @@ for path in [
 from nl_probes.utils.steering_hooks import add_hook, get_hf_activation_steering_hook
 from nl_probes.utils.common import load_tokenizer, set_seed
 from nl_probes.utils.dataset_utils import get_introspection_prefix, SPECIAL_TOKEN
+
+
+def random_confidence() -> int:
+    """Generate varied confidence levels across the full range."""
+    # Mix of distributions to get good coverage
+    r = random.random()
+    if r < 0.3:
+        # Low confidence (5-35)
+        return random.randint(5, 35)
+    elif r < 0.6:
+        # Medium confidence (35-65)
+        return random.randint(35, 65)
+    elif r < 0.9:
+        # High confidence (65-95)
+        return random.randint(65, 95)
+    else:
+        # Extreme values
+        return random.choice([5, 10, 15, 85, 90, 95])
 
 
 def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
@@ -84,15 +100,6 @@ def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
         raise RuntimeError(f"Could not find layers in {type(base_model)}")
 
     submodule = layers[cfg.hook_layer]
-
-    # Judge
-    print(f"Using judge: {cfg.judge_model}")
-    judge = InformativenessJudge(
-        model=cfg.judge_model,
-        temperature=cfg.judge_temperature,
-        max_tokens=cfg.judge_max_tokens,
-        thinking_level=cfg.judge_thinking_level,
-    )
 
     # Load dataset
     print("Loading dataset...")
@@ -187,14 +194,8 @@ def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
         if not raw_answer:
             continue
 
-        # Score with judge
-        judge_result = judge.score_batch_sync([prompt], [question], [raw_answer])[0]
-
-        # Map informativeness (0-1) to confidence (0-100)
-        # Add some noise to encourage varied confidence
-        base_conf = int(judge_result.informativeness * 100)
-        noise = random.randint(-10, 10)
-        confidence = max(5, min(95, base_conf + noise))
+        # Random confidence - GRPO will learn calibration later
+        confidence = random_confidence()
 
         # Format with epistemic status
         formatted_answer = format_epistemic_output(confidence, raw_answer)
@@ -206,15 +207,13 @@ def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
             "prefix": prefix,
             "answer": formatted_answer,
             "raw_answer": raw_answer,
-            "judge_score": judge_result.informativeness,
             "confidence": confidence,
         })
 
-        if i % 50 == 0 and sft_examples:
-            print(f"\nExample {i}:")
+        if i % 100 == 0 and sft_examples:
+            print(f"\nExample {i}: conf={confidence}")
             print(f"  Q: {question[:60]}...")
             print(f"  A: {formatted_answer[:80]}...")
-            print(f"  Judge: {judge_result.informativeness:.2f}")
 
     return sft_examples
 

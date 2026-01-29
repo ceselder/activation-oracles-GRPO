@@ -26,6 +26,7 @@ from grpo_ao.config import GRPOConfig
 from grpo_ao.epistemic_status import parse_oracle_output, ORACLE_SYSTEM_PROMPT
 from grpo_ao.judge import InformativenessJudge
 from grpo_ao.reward import compute_reward
+from grpo_ao.calibration_eval import compute_calibration_metrics
 
 # Import from activation oracle repo
 import sys
@@ -101,11 +102,13 @@ class GRPOTrainer:
 
         self.submodule = self.layers[self.cfg.hook_layer]
 
-        # Judge (Gemini Flash via OpenRouter)
+        # Judge (Gemini 3 Flash via OpenRouter with CoT)
         print(f"Using judge: {self.cfg.judge_model}")
         self.judge = InformativenessJudge(
             model=self.cfg.judge_model,
             temperature=self.cfg.judge_temperature,
+            max_tokens=self.cfg.judge_max_tokens,
+            thinking_level=self.cfg.judge_thinking_level,
         )
 
         # Optimizer
@@ -170,9 +173,17 @@ class GRPOTrainer:
             {"role": "user", "content": prefix + question},
         ]
 
-        encoded = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_tensors=None
-        )
+        # Disable Qwen3 thinking mode
+        try:
+            encoded = self.tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True, return_tensors=None,
+                enable_thinking=False,  # Qwen3 specific
+            )
+        except TypeError:
+            # Fallback for models that don't support enable_thinking
+            encoded = self.tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True, return_tensors=None
+            )
         # Handle different return types
         if hasattr(encoded, 'input_ids'):
             input_ids_list = encoded.input_ids
@@ -188,26 +199,31 @@ class GRPOTrainer:
         if len(positions) != num_positions:
             positions = list(range(num_positions))
 
+        # Batch all generations together for efficiency
+        batched_input_ids = input_ids.repeat(num_responses, 1)  # [G, seq_len]
+
+        # Hook needs vectors/positions for each batch item
         hook_fn = get_hf_activation_steering_hook(
-            vectors=[steering_vectors],
-            positions=[positions],
+            vectors=[steering_vectors] * num_responses,
+            positions=[positions] * num_responses,
             steering_coefficient=1.0,
             device=self.device,
             dtype=self.dtype,
         )
 
+        with add_hook(self.submodule, hook_fn):
+            outputs = self.model.generate(
+                batched_input_ids,
+                max_new_tokens=self.cfg.max_new_tokens,
+                do_sample=True,
+                temperature=self.cfg.oracle_temperature,
+                top_p=0.95,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+
         responses = []
-        for _ in range(num_responses):
-            with add_hook(self.submodule, hook_fn):
-                output = self.model.generate(
-                    input_ids,
-                    max_new_tokens=self.cfg.max_new_tokens,
-                    do_sample=True,
-                    temperature=self.cfg.oracle_temperature,
-                    top_p=0.95,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                )
-            response = self.tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
+        for i in range(num_responses):
+            response = self.tokenizer.decode(outputs[i][input_ids.shape[1]:], skip_special_tokens=True)
             responses.append(response)
 
         return responses
@@ -233,16 +249,28 @@ class GRPOTrainer:
                 {"role": "assistant", "content": response},
             ]
 
-            full_encoded = self.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=False, return_tensors=None
-            )
+            try:
+                full_encoded = self.tokenizer.apply_chat_template(
+                    messages, tokenize=True, add_generation_prompt=False, return_tensors=None,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                full_encoded = self.tokenizer.apply_chat_template(
+                    messages, tokenize=True, add_generation_prompt=False, return_tensors=None
+                )
             full_ids_list = full_encoded.input_ids if hasattr(full_encoded, 'input_ids') else list(full_encoded)
             input_ids = torch.tensor([full_ids_list], device=self.device)
 
             # Create labels (mask prompt)
-            prompt_encoded = self.tokenizer.apply_chat_template(
-                messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None
-            )
+            try:
+                prompt_encoded = self.tokenizer.apply_chat_template(
+                    messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                prompt_encoded = self.tokenizer.apply_chat_template(
+                    messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None
+                )
             prompt_ids_list = prompt_encoded.input_ids if hasattr(prompt_encoded, 'input_ids') else list(prompt_encoded)
             labels = input_ids.clone()
             labels[0, :len(prompt_ids_list)] = -100
@@ -334,6 +362,166 @@ class GRPOTrainer:
 
         return metrics, responses, rewards, question, prompt
 
+    def run_holdout_eval(self, step: int) -> dict:
+        """Run evaluation on classification benchmarks (holdout tasks).
+
+        Uses the same datasets as sft.py: geometry_of_truth, sst2, etc.
+        """
+        from nl_probes.utils.dataset_utils import (
+            get_introspection_prefix,
+            materialize_missing_steering_vectors,
+            SPECIAL_TOKEN,
+        )
+        from nl_probes.dataset_classes.classification import (
+            ClassificationDatasetConfig,
+            ClassificationDatasetLoader,
+        )
+        from nl_probes.dataset_classes.act_dataset_manager import DatasetLoaderConfig
+
+        CLASSIFICATION_DATASETS = {
+            "geometry_of_truth": 100,
+            "sst2": 100,
+            "ag_news": 100,
+            "tense": 100,
+            "singular_plural": 100,
+        }
+
+        if self.cfg.eval_datasets:
+            CLASSIFICATION_DATASETS = {k: v for k, v in CLASSIFICATION_DATASETS.items()
+                                       if k in self.cfg.eval_datasets}
+
+        self.model.eval()
+        all_confidences = []
+        all_correct = []
+        eval_results = {}
+
+        for ds_name, num_test in CLASSIFICATION_DATASETS.items():
+            print(f"  Evaluating {ds_name}...")
+
+            try:
+                config = DatasetLoaderConfig(
+                    dataset_name="",
+                    num_train=0,
+                    num_test=num_test,
+                    splits=["test"],
+                    model_name=self.cfg.model_name,
+                    layer_percents=self.cfg.layer_percents,
+                    save_acts=False,
+                    batch_size=0,
+                    seed=42,
+                    custom_dataset_params=ClassificationDatasetConfig(
+                        classification_dataset_name=ds_name,
+                        max_window_size=5,
+                        min_end_offset=-1,
+                        max_end_offset=-5,
+                        num_qa_per_sample=1,
+                    ),
+                )
+                loader = ClassificationDatasetLoader(dataset_config=config)
+                eval_data = loader.load_dataset("test")
+            except Exception as e:
+                print(f"    Failed to load {ds_name}: {e}")
+                continue
+
+            if not eval_data:
+                continue
+
+            # Materialize steering vectors
+            eval_data = materialize_missing_steering_vectors(eval_data, self.tokenizer, self.model)
+
+            ds_confidences = []
+            ds_correct = []
+
+            for dp in eval_data[:num_test]:
+                num_positions = len(dp.positions)
+                prefix = get_introspection_prefix(dp.layer, num_positions)
+                question = self.tokenizer.decode(dp.input_ids, skip_special_tokens=True)
+                if "Answer with" in question:
+                    question = question[question.find("Answer with"):]
+
+                messages = [
+                    {"role": "system", "content": ORACLE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prefix + question},
+                ]
+
+                encoded = self.tokenizer.apply_chat_template(
+                    messages, tokenize=True, add_generation_prompt=True, return_tensors=None
+                )
+                input_ids_list = encoded.input_ids if hasattr(encoded, 'input_ids') else list(encoded)
+                input_ids = torch.tensor([input_ids_list], device=self.device)
+
+                special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
+                positions = [i for i, t in enumerate(input_ids_list) if t == special_token_id][:num_positions]
+                if len(positions) != num_positions:
+                    positions = list(range(num_positions))
+
+                steering_vectors = dp.steering_vectors
+                if steering_vectors is None:
+                    continue
+
+                hook_fn = get_hf_activation_steering_hook(
+                    vectors=[steering_vectors],
+                    positions=[positions],
+                    steering_coefficient=1.0,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+
+                with torch.no_grad(), add_hook(self.submodule, hook_fn):
+                    output_ids = self.model.generate(
+                        input_ids,
+                        max_new_tokens=30,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+
+                response = self.tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
+                parsed = parse_oracle_output(response)
+
+                target = dp.target_output.strip().lower()
+                answer = parsed.answer.strip().lower().rstrip(".!?,;:")
+                is_correct = answer == target
+
+                ds_confidences.append(parsed.confidence_normalized)
+                ds_correct.append(is_correct)
+
+            if ds_confidences:
+                metrics = compute_calibration_metrics(ds_confidences, ds_correct)
+                eval_results[ds_name] = {
+                    "accuracy": metrics.accuracy,
+                    "ece": metrics.ece,
+                    "brier": metrics.brier,
+                    "mean_confidence": metrics.mean_confidence,
+                    "n_samples": metrics.n_samples,
+                }
+                print(f"    {ds_name}: acc={metrics.accuracy:.3f} ece={metrics.ece:.3f} brier={metrics.brier:.3f}")
+                all_confidences.extend(ds_confidences)
+                all_correct.extend(ds_correct)
+
+        # Overall metrics
+        if all_confidences:
+            overall = compute_calibration_metrics(all_confidences, all_correct)
+            eval_results["_overall"] = {
+                "accuracy": overall.accuracy,
+                "ece": overall.ece,
+                "brier": overall.brier,
+                "mean_confidence": overall.mean_confidence,
+                "n_samples": overall.n_samples,
+            }
+            print(f"  OVERALL: acc={overall.accuracy:.3f} ece={overall.ece:.3f} brier={overall.brier:.3f}")
+
+            # Log to wandb
+            wandb.log({
+                f"eval/step": step,
+                f"eval/accuracy": overall.accuracy,
+                f"eval/ece": overall.ece,
+                f"eval/brier": overall.brier,
+                f"eval/mean_confidence": overall.mean_confidence,
+            })
+
+        self.model.train()
+        return eval_results
+
     def train(self):
         """Main training loop."""
         print("Starting GRPO training")
@@ -382,14 +570,48 @@ class GRPOTrainer:
                 self.model.save_pretrained(save_path)
                 print(f"Saved checkpoint to {save_path}")
 
+                # Run holdout eval
+                if self.cfg.eval_at_checkpoints:
+                    print(f"\nRunning holdout evaluation at step {step}...")
+                    try:
+                        eval_results = self.run_holdout_eval(step)
+                    except Exception as e:
+                        print(f"Eval failed: {e}")
+
             pbar.update(1)
             pbar.set_postfix(loss=f"{metrics['loss']:.3f}", reward=f"{metrics['mean_reward']:.3f}")
 
             # Clear cache periodically
-            if step % 50 == 0:
+    
+Examples:
+[epistemic status: 94] No, this question is not about tennis.
+[epistemic status: 84] The user is asking about Python debugging.
+[epistemic status: 55] This seems to be about cooking, but there's some ambiguity in the signal.
+[epistemic status: 22] Possibly about travel, but the signal is very weak. (but here you would be very uncertain)
+[epistemic status: 5] I cannot determine the topic from these activations.        if step % 50 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
 
         pbar.close()
+
+        # Save final checkpoint
+        final_path = Path(self.cfg.save_dir) / "final"
+        final_path.mkdir(parents=True, exist_ok=True)
+        self.model.save_pretrained(final_path)
+        print(f"Saved final checkpoint to {final_path}")
+
+        # Push to HuggingFace Hub
+        if self.cfg.push_to_hub:
+            print(f"Pushing to HuggingFace Hub: {self.cfg.hub_repo_id}")
+            try:
+                self.model.push_to_hub(
+                    self.cfg.hub_repo_id,
+                    commit_message=f"GRPO trained for {self.cfg.num_train_steps} steps",
+                )
+                self.tokenizer.push_to_hub(self.cfg.hub_repo_id)
+                print(f"Successfully pushed to {self.cfg.hub_repo_id}")
+            except Exception as e:
+                print(f"Failed to push to hub: {e}")
+
         print("Training complete!")
         wandb.finish()

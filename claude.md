@@ -280,3 +280,32 @@ def parse_oracle_output(response: str) -> tuple[int, str]:
 - Switched default model to Qwen3-8B for fast iteration
 - Added initial eval toggle (`run_initial_eval`, `--no_initial_eval`)
 - Compared eval to reference: ours focuses on calibration, theirs on TPR
+
+### 2026-01-29: Training Run Analysis & Fixes
+**Problem observed:** mean_confidence collapsed to ~50 (hedging), informativeness went up but calibration didn't improve
+
+**Fixes made:**
+- Judge: switched to Gemini 3 Flash (`google/gemini-3-flash-preview`) with CoT
+- Judge: scores -100 to 100 (normalized to 0-1), stricter prompt
+- λ (calibration penalty): 0.5 → 1.0
+- Oracle system prompt: shortened significantly for perf
+- Disabled Qwen3 thinking mode (`enable_thinking=False`)
+- Batched generation: 8 responses now generated in one forward pass (8x speedup)
+- Added holdout eval at checkpoints (classification benchmarks)
+
+**Dataset regeneration in progress:**
+- Using `fetch_wildchat_questions.py` with Gemini 3 Flash
+- Focus: hard negatives (plausibly related but wrong), subtle distinctions
+- 40% yes/no questions, 60% open-ended
+- 50% negative answers
+- Model-focused ("Is the model thinking about X?") and user-focused questions
+
+**To run dataset generation:**
+```bash
+OPENROUTER_API_KEY="sk-or-v1-..." HF_TOKEN="hf_..." python fetch_wildchat_questions.py
+```
+
+**To start training:**
+```bash
+python train.py --num_train_steps 1000 --calibration_lambda 1.0
+```

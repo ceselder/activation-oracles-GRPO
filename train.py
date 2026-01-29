@@ -40,6 +40,16 @@ def main():
     parser.add_argument("--checkpoint_every", type=int, default=100)
     parser.add_argument("--wandb_project", type=str, default="grpo-activation-oracle")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--eval_at_checkpoints", action="store_true", default=True,
+                        help="Run holdout evals at each checkpoint")
+    parser.add_argument("--no_eval", action="store_true",
+                        help="Disable holdout evals")
+    parser.add_argument("--push_to_hub", action="store_true", default=True,
+                        help="Push final model to HuggingFace Hub")
+    parser.add_argument("--no_push", action="store_true",
+                        help="Disable pushing to HuggingFace Hub")
+    parser.add_argument("--hub_repo_id", type=str, default="ceselder/grpo-activation-oracle-qwen3-8b",
+                        help="HuggingFace Hub repo ID")
 
     args = parser.parse_args()
 
@@ -55,6 +65,9 @@ def main():
         checkpoint_every=args.checkpoint_every,
         wandb_project=args.wandb_project,
         seed=args.seed,
+        eval_at_checkpoints=not args.no_eval,
+        push_to_hub=not args.no_push,
+        hub_repo_id=args.hub_repo_id,
     )
 
     print("=" * 60)

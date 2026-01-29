@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Generate diverse WildChat prompts with oracle probe questions using Gemini.
-Key: ~50% questions should have NEGATIVE answers, mix of binary/open-ended.
+Generate WildChat prompts with oracle probe questions.
+Uses Gemini 3 Flash with low reasoning effort.
+Focus: Questions HARD to answer from activations but EASY to judge externally.
 """
 
 import json
@@ -11,52 +12,72 @@ from pathlib import Path
 import requests
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MODEL = "google/gemini-2.5-flash-lite"
+MODEL = "google/gemini-3-flash-preview"
 OUTPUT_PATH = Path(__file__).parent / "datasets" / "wildchat_oracle_questions.jsonl"
 
-PRICE_PER_M_INPUT = 0.10
-PRICE_PER_M_OUTPUT = 0.40
+# Gemini 3 Flash pricing
+PRICE_PER_M_INPUT = 0.50
+PRICE_PER_M_OUTPUT = 3.00
 
-PROMPT_TEMPLATE = """Generate 20 training examples for an activation oracle. For each example:
+PROMPT_TEMPLATE = """Generate 15 training examples for an activation oracle. For each example:
 1. A realistic user message (like WildChat/ShareGPT)
-2. 6-10 diverse probe questions about that message
+2. 8-12 probe questions - MIX of model-focused AND user-focused questions
 
-CRITICAL REQUIREMENTS FOR QUESTIONS:
-- ~50% should have NEGATIVE answers (ask about wrong topics, wrong emotions, etc.)
-- Mix question TYPES:
-  * Binary yes/no: "Is this about X?", "Does the user seem Y?"
-  * Open-ended: "What is the main topic?", "What emotion is expressed?"
-  * Inference: "What can you infer about the author?"
-  * Counterfactual negatives: "Is this a cooking recipe?" (for a coding question)
-  * Degree/scale: "How formal is the tone?"
-  * Specific probes: "Is there a question being asked?", "Does this contain code?"
+QUESTION DESIGN PRINCIPLES:
 
-QUESTION CATEGORIES (use variety):
-- Topic: "Is this about technology?", "What subject is being discussed?"
-- Sentiment: "Is the user frustrated?", "What emotion is conveyed?"
-- Intent: "Is this asking for help?", "What does the user want?"
-- Author traits: "Is the author technical?", "What expertise level?"
-- Tone: "Is this formal?", "How casual is the writing?"
-- Content type: "Is there code?", "Are there numbers?", "Is this a story?"
-- Negatives: Ask about WRONG topics/emotions to get "No" answers
+1. SUBTLE DISTINCTIONS (not obvious yes/no):
+   - "Is the user frustrated or just confused?" (requires nuance)
+   - "Is this a complaint or a request for help?" (often ambiguous)
+   - "Is the tone sarcastic or genuinely enthusiastic?"
+   - "Is the user venting or seeking advice?"
 
-Format EXACTLY:
+2. HARD NEGATIVES (plausibly related but wrong):
+   - For a Python debugging question: "Is this about web development?" (related but wrong)
+   - For relationship advice: "Is this about friendship issues?" (close but different)
+   - For a recipe request: "Is this about nutrition advice?" (food-related but wrong)
+   DON'T use obviously wrong negatives like "Is this about space travel?" for a cooking question.
+
+3. DEGREE/SPECTRUM QUESTIONS:
+   - "How technical is this message?"
+   - "Is the user slightly annoyed or very angry?"
+   - "Is this formal, casual, or somewhere in between?"
+
+4. MODEL-FOCUSED (vary phrasing):
+   - "What is the model thinking about?"
+   - "Is the model processing a technical problem?"
+   - "Does this involve [concept]?"
+   - "Is the model detecting [emotion]?"
+
+5. USER-FOCUSED:
+   - "What does the user want?"
+   - "Is the user experienced with this topic?"
+   - "What's the user's emotional state?"
+
+REQUIREMENTS:
+- ~50% should have NEGATIVE answers, but make them HARD negatives (plausibly related)
+- ~40% YES/NO questions (answer is just "Yes" or "No")
+- ~60% open-ended questions (answer is a phrase/sentence)
+- Include subtle distinction questions
+- Vary phrasing
+- All questions must be verifiable by reading the text
+
+Format:
 ===
-USER: [user message - vary length, topic, style, occasional typos]
+USER: [realistic user message]
 QUESTIONS:
-- What is the model thinking about?
-- Is this about [WRONG topic]?
-- [open-ended about actual content]
-- Does the user seem [WRONG emotion]?
-- [question about intent]
-- Is there [thing that ISN'T there]?
-- [inference question]
-- What is the tone?
+- Is this about programming?
+- Is the model detecting frustration?
+- Is this about web development?
+- What is the main topic?
+- Is the user seeking advice or venting?
+- Is the tone formal?
+- Does this involve databases?
+- What does the user want?
 ===
 
-Topics to cover across examples: coding, creative writing, relationship advice, casual chat, homework help, roleplay, travel, food, science, philosophy, gaming, work problems, health, etc.
+Topics: coding, creative writing, relationship advice, casual chat, homework, roleplay, travel, food, science, philosophy, gaming, work problems, health, tech support.
 
-Generate 20 diverse examples:"""
+Generate 15 examples with CHALLENGING questions:"""
 
 
 def fetch_batch() -> tuple[list[dict], int, int]:
@@ -69,8 +90,9 @@ def fetch_batch() -> tuple[list[dict], int, int]:
         json={
             "model": MODEL,
             "messages": [{"role": "user", "content": PROMPT_TEMPLATE}],
-            "temperature": 1.1,
-            "max_tokens": 6000,
+            "temperature": 1.0,
+            "max_tokens": 8000,
+            "thinking": {"type": "enabled", "budget_tokens": 1000},  # Low reasoning
         },
     )
     response.raise_for_status()
@@ -120,9 +142,10 @@ def fetch_batch() -> tuple[list[dict], int, int]:
 
 
 def main():
-    target = 1000
+    target = 100  # Small challenging dataset
     print(f"Target: {target} examples")
     print(f"Model: {MODEL}")
+    print(f"Pricing: ${PRICE_PER_M_INPUT}/M in, ${PRICE_PER_M_OUTPUT}/M out")
     print(f"Output: {OUTPUT_PATH}\n")
 
     all_examples = []
@@ -165,12 +188,15 @@ def main():
     # Stats
     all_qs = [q for ex in all_examples for q in ex["oracle_questions"]]
     binary_qs = sum(1 for q in all_qs if q.lower().startswith(("is ", "does ", "are ", "do ", "was ", "has ", "can ", "will ", "would ", "should ")))
+    topic_qs = sum(1 for q in all_qs if any(w in q.lower() for w in ["topic", "about", "subject", "domain"]))
+    emotion_qs = sum(1 for q in all_qs if any(w in q.lower() for w in ["frustrated", "angry", "happy", "anxious", "emotion", "feel", "mood", "tone"]))
 
     print(f"\n{'='*50}")
     print(f"DONE! {len(all_examples)} examples")
     print(f"Total questions: {len(all_qs)}")
     print(f"Binary questions: {binary_qs} ({100*binary_qs/len(all_qs):.1f}%)")
-    print(f"Open-ended: {len(all_qs) - binary_qs} ({100*(len(all_qs)-binary_qs)/len(all_qs):.1f}%)")
+    print(f"Topic probes: {topic_qs} ({100*topic_qs/len(all_qs):.1f}%)")
+    print(f"Emotion probes: {emotion_qs} ({100*emotion_qs/len(all_qs):.1f}%)")
     print(f"Tokens: {total_input:,} in / {total_output:,} out")
     print(f"TOTAL COST: ${total_cost:.4f}")
     print(f"Saved to: {OUTPUT_PATH}")
@@ -195,26 +221,34 @@ def upload_to_hf(examples, cost, total_qs, binary_qs):
 
     readme = f"""# WildChat Oracle Questions Dataset
 
-Training data for activation oracles: user prompts paired with diverse probe questions.
+Training data for activation oracles: user prompts paired with semantic probe questions.
 
-## Key Features
-- **~50% negative questions**: Questions designed to have "No" answers (probing wrong topics/emotions)
-- **Mixed question types**: Binary (yes/no) and open-ended questions
-- **Diverse probes**: Topic, sentiment, intent, author traits, tone, content type
+## Design Principle
+
+Questions probe **SEMANTIC CONTENT** encoded in neural activations - what concepts, emotions, and intentions are being processed. ~50% have negative answers to test calibration.
+
+## Question Types
+
+- **Topic/domain**: "What is the main topic?", "Is this about cooking?"
+- **Emotion/sentiment**: "Is the user frustrated?", "What mood is conveyed?"
+- **Intent/goal**: "What does the user want?", "Is this asking for help?"
+- **Inference**: "Does the user seem experienced?", "Is this from a student?"
+- **Subtle distinctions**: "Confused or curious?", "Complaint or question?"
+- **Negative probes**: Wrong topics/emotions to get "No" answers
 
 ## Stats
 - Examples: {len(examples)}
 - Total questions: {total_qs}
 - Binary questions: {binary_qs} ({100*binary_qs/total_qs:.1f}%)
-- Open-ended: {total_qs - binary_qs} ({100*(total_qs-binary_qs)/total_qs:.1f}%)
 - Generation cost: ${cost:.4f}
+- Model: google/gemini-3-flash-preview
 
 ## Format
 ```json
 {{
   "wildchat_question": "user message...",
   "language": "english",
-  "oracle_questions": ["What is the model thinking about?", "Is this about cooking?", ...]
+  "oracle_questions": ["What is the main topic?", "Is the user frustrated?", ...]
 }}
 ```
 

@@ -25,24 +25,19 @@ class JudgeResult:
 
 
 def _parse_score(response: str) -> float | None:
-    """Parse a 0-1 score from judge response."""
+    """Parse a -100 to 100 score from judge response and normalize to 0-1."""
     response = response.strip()
 
-    # Try direct float parse first
-    try:
-        score = float(response)
-        if 0.0 <= score <= 1.0:
-            return score
-    except ValueError:
-        pass
-
-    # Try to find a decimal number in the response
-    match = re.search(r"([01]\.?\d*)", response)
-    if match:
+    # Look for the last number in the response (final score after CoT)
+    # Match integers, possibly negative
+    matches = re.findall(r"-?\d+", response)
+    if matches:
         try:
-            score = float(match.group(1))
-            if 0.0 <= score <= 1.0:
-                return score
+            # Take the last number (final answer after reasoning)
+            score = int(matches[-1])
+            # Clamp to [-100, 100] and normalize to [0, 1]
+            score = max(-100, min(100, score))
+            return (score + 100) / 200.0  # -100 -> 0, 0 -> 0.5, 100 -> 1
         except ValueError:
             pass
 
@@ -54,8 +49,10 @@ class InformativenessJudge:
 
     def __init__(
         self,
-        model: str = "qwen/qwen-2.5-72b-instruct",
+        model: str = "google/gemini-3-flash-preview",
         temperature: float = 0.0,
+        max_tokens: int = 1000,
+        thinking_level: str = "low",
         api_key: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
         max_concurrent: int = 50,
@@ -65,12 +62,16 @@ class InformativenessJudge:
         Args:
             model: Model to use via OpenRouter
             temperature: Generation temperature (0.0 for deterministic)
+            max_tokens: Max tokens for response (increase for CoT)
+            thinking_level: CoT level (minimal/low/medium/high) for Gemini 3
             api_key: OpenRouter API key (or set OPENROUTER_API_KEY env var)
             base_url: API base URL
             max_concurrent: Max concurrent API calls
         """
         self.model = model
         self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.thinking_level = thinking_level
         self.max_concurrent = max_concurrent
 
         api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
@@ -98,9 +99,13 @@ class InformativenessJudge:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": judge_prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a judge that rates answer quality. Think through your reasoning, then output your final score as an integer from -100 to 100 on the last line."},
+                    {"role": "user", "content": judge_prompt},
+                ],
                 temperature=self.temperature,
-                max_tokens=10,
+                max_tokens=self.max_tokens,
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": self.max_tokens // 2}},
             )
             raw = response.choices[0].message.content or ""
             score = _parse_score(raw)

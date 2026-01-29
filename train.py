@@ -28,14 +28,15 @@ from grpo_ao.grpo_trainer import GRPOTrainer
 def main():
     parser = argparse.ArgumentParser(description="Train calibrated Activation Oracle with GRPO")
 
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B")
-    parser.add_argument("--oracle_lora_path", type=str,
-                        default="adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B")
-    parser.add_argument("--num_train_steps", type=int, default=1000)
-    parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--kl_penalty", type=float, default=0.05)
-    parser.add_argument("--calibration_lambda", type=float, default=0.5)
+    # Defaults from GRPOConfig
+    defaults = GRPOConfig()
+    parser.add_argument("--model", type=str, default=defaults.model_name)
+    parser.add_argument("--oracle_lora_path", type=str, default=defaults.oracle_lora_path)
+    parser.add_argument("--num_train_steps", type=int, default=defaults.num_train_steps)
+    parser.add_argument("--num_generations", type=int, default=defaults.num_generations)
+    parser.add_argument("--lr", type=float, default=defaults.learning_rate)
+    parser.add_argument("--kl_penalty", type=float, default=defaults.kl_penalty)
+    parser.add_argument("--calibration_lambda", type=float, default=defaults.calibration_lambda)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--checkpoint_every", type=int, default=100)
     parser.add_argument("--wandb_project", type=str, default="grpo-activation-oracle")

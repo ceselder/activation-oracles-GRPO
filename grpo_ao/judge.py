@@ -168,7 +168,17 @@ class InformativenessJudge:
         answers: Sequence[str],
     ) -> list[JudgeResult]:
         """Synchronous wrapper for score_batch."""
-        return asyncio.run(self.score_batch(prompts, questions, answers))
+        try:
+            # Check if there's already an event loop running
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop running, use asyncio.run()
+            return asyncio.run(self.score_batch(prompts, questions, answers))
+        else:
+            # Loop already running (e.g. Jupyter, wandb) - use nest_asyncio or create task
+            import nest_asyncio
+            nest_asyncio.apply()
+            return loop.run_until_complete(self.score_batch(prompts, questions, answers))
 
 
 class LocalJudge:

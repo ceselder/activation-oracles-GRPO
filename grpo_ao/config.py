@@ -22,12 +22,16 @@ class GRPOConfig:
     # GRPO
     num_train_steps: int = 1000
     num_generations: int = 8  # G responses per (prompt, question)
-    kl_penalty: float = 0.05
-    calibration_lambda: float = 1.0  # Increased from 0.5 to penalize hedging at 50
-    oracle_temperature: float = 0.9
+    kl_penalty: float = 0.04
+    calibration_lambda: float = 0.75  # Brier score weight
+    oracle_temperature: float = 1.0
+    # Dr. GRPO: "none" = don't scale by std (recommended), "group" = original GRPO, "batch" = batch-level std
+    scale_rewards: str = "none"
+    # Dr. GRPO length bias fix: if True, don't divide loss by response length
+    fix_length_bias: bool = True
 
     # Training
-    learning_rate: float = 1e-6
+    learning_rate: float = 3e-6
     max_grad_norm: float = 1.0
     max_new_tokens: int = 80
 

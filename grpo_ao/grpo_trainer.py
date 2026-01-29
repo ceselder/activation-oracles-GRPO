@@ -292,10 +292,21 @@ class GRPOTrainer:
             with add_hook(self.submodule, hook_fn):
                 outputs = self.model(input_ids=input_ids, labels=labels)
 
-            # Weight loss by advantage (GRPO: positive advantage = reinforce, negative = penalize)
-            total_loss += outputs.loss * advantage
+            # Dr. GRPO length bias fix: multiply by response length to get sum of token losses
+            loss = outputs.loss
+            if self.cfg.fix_length_bias:
+                response_len = (labels[0] != -100).sum().item()
+                if response_len > 0:
+                    loss = loss * response_len  # Convert mean -> sum
 
-        return total_loss / len(responses)
+            # Weight loss by advantage (GRPO: positive advantage = reinforce, negative = penalize)
+            total_loss += loss * advantage
+
+        # Dr. GRPO: divide by (max_length * num_generations) not just num_generations
+        if self.cfg.fix_length_bias:
+            return total_loss / (self.cfg.max_new_tokens * len(responses))
+        else:
+            return total_loss / len(responses)
 
     def train_step(self, example: dict) -> dict:
         """Single GRPO training step on one example."""
@@ -334,8 +345,12 @@ class GRPOTrainer:
         mean_reward = sum(reward_vals) / len(reward_vals)
         std_reward = (sum((r - mean_reward)**2 for r in reward_vals) / len(reward_vals)) ** 0.5
 
-        # Compute advantages (group-relative)
-        if std_reward > 1e-8:
+        # Compute advantages (Dr. GRPO: don't scale by std to avoid difficulty bias)
+        if self.cfg.scale_rewards == "none":
+            # Dr. GRPO: just center, don't scale
+            advantages = [r - mean_reward for r in reward_vals]
+        elif self.cfg.scale_rewards == "group" and std_reward > 1e-8:
+            # Original GRPO: scale by group std
             advantages = [(r - mean_reward) / std_reward for r in reward_vals]
         else:
             advantages = [0.0] * len(reward_vals)  # No learning if all same
@@ -582,13 +597,7 @@ class GRPOTrainer:
             pbar.set_postfix(loss=f"{metrics['loss']:.3f}", reward=f"{metrics['mean_reward']:.3f}")
 
             # Clear cache periodically
-    
-Examples:
-[epistemic status: 94] No, this question is not about tennis.
-[epistemic status: 84] The user is asking about Python debugging.
-[epistemic status: 55] This seems to be about cooking, but there's some ambiguity in the signal.
-[epistemic status: 22] Possibly about travel, but the signal is very weak. (but here you would be very uncertain)
-[epistemic status: 5] I cannot determine the topic from these activations.        if step % 50 == 0:
+            if step % 50 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
 

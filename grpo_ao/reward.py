@@ -35,6 +35,9 @@ class RewardResult:
         return abs(self.confidence_normalized - self.informativeness)
 
 
+FORMAT_PENALTY = -0.5  # Penalty for malformed output (no epistemic status)
+
+
 def compute_reward(
     oracle_output: OracleOutput,
     informativeness: float,
@@ -43,13 +46,24 @@ def compute_reward(
     """Compute reward for a single oracle response.
 
     Args:
-        oracle_output: Parsed oracle output with confidence (0-100)
+        oracle_output: Parsed oracle output with confidence (0-100, or -1 if malformed)
         informativeness: Judge's 0-1 score for answer quality
         calibration_lambda: Weight for calibration penalty (default 0.5)
 
     Returns:
         RewardResult with reward and component scores
     """
+    # Malformed output (no epistemic status) gets penalty
+    if not oracle_output.parse_success:
+        return RewardResult(
+            reward=FORMAT_PENALTY,
+            informativeness=informativeness,
+            confidence=-1,
+            confidence_normalized=0.0,
+            brier_score=1.0,
+            parse_success=False,
+        )
+
     confidence = oracle_output.confidence  # 0-100
     confidence_norm = oracle_output.confidence_normalized  # 0-1
     brier = (confidence_norm - informativeness) ** 2
@@ -62,7 +76,7 @@ def compute_reward(
         confidence=confidence,
         confidence_normalized=confidence_norm,
         brier_score=brier,
-        parse_success=oracle_output.parse_success,
+        parse_success=True,
     )
 
 

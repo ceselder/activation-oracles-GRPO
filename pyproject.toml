@@ -15,6 +15,7 @@ dependencies = [
     "bitsandbytes>=0.43.0",
     "accelerate>=0.28.0",
     "openai>=1.0.0",
+    "nest-asyncio>=1.6.0",
 ]
 
 [project.optional-dependencies]

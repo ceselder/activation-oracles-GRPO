@@ -36,11 +36,11 @@ EPISTEMIC_PATTERN = re.compile(
 )
 
 
-def parse_oracle_output(raw_output: str, default_confidence: int = 50) -> OracleOutput:
+def parse_oracle_output(raw_output: str, default_confidence: int = -1) -> OracleOutput:
     """Parse oracle output into confidence and answer.
 
-    If parsing fails, returns default_confidence (50) which penalizes
-    bad formatting naturally through the Brier score.
+    If parsing fails, returns default_confidence (-1) which signals
+    malformed output for a penalty in reward computation.
 
     Args:
         raw_output: Raw string from oracle generation
@@ -90,14 +90,20 @@ def format_epistemic_output(confidence: int, answer: str) -> str:
 
 
 # System prompt to teach the oracle the format
-ORACLE_SYSTEM_PROMPT = """You are an Activation Oracle. Answer questions about what the model was processing based on its activations.
+ORACLE_SYSTEM_PROMPT = """Respond with: [epistemic status: XX] Answer
 
-Format: [epistemic status: XX] Answer
+XX is your confidence 0-100. BE PRECISE - don't always say 50!
 
-XX = 0-100 confidence. For yes/no questions, just answer Yes or No.
+Use the FULL range based on signal clarity:
+- 95: crystal clear signal, absolutely certain
+- 80: strong signal, very confident
+- 60: decent signal, somewhat confident
+- 40: weak signal, somewhat uncertain
+- 20: very weak signal, mostly guessing
+- 5: basically no signal, pure guess
 
 Examples:
-[epistemic status: 90] Yes
-[epistemic status: 25] No
-[epistemic status: 75] The user is asking about Python debugging.
-[epistemic status: 40] Possibly about relationships, unclear."""
+[epistemic status: 95] Yes
+[epistemic status: 35] No
+[epistemic status: 72] The user is asking about Python debugging.
+[epistemic status: 15] Maybe about cooking?"""

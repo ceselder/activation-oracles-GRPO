@@ -8,10 +8,10 @@ class GRPOConfig:
     """GRPO training configuration."""
 
     # Model
-    model_name: str = "Qwen/Qwen3-8B"
-    oracle_lora_path: str | None = "adamkarvonen/checkpoints_all_single_and_multi_pretrain_cls_latentqa_posttrain_Qwen3-8B"
+    model_name: str = "google/gemma-2-9b-it"
+    oracle_lora_path: str | None = "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it"
     hook_layer: int = 1
-    layer_percents: list[int] = field(default_factory=lambda: [25, 50, 75])
+    layer_percents: list[int] = field(default_factory=lambda: [50])  # Only middle layer
 
     # LoRA (if no pretrained checkpoint)
     lora_r: int = 64
@@ -21,19 +21,21 @@ class GRPOConfig:
 
     # GRPO
     num_train_steps: int = 1000
-    num_generations: int = 8  # G responses per (prompt, question)
+    num_generations: int = 8  # Reduced - no gradient checkpointing due to hook conflict
+    examples_per_batch: int = 2  # 8×2=16 rollouts per batch (fits in 140GB without checkpointing)
     kl_penalty: float = 0.04
     calibration_lambda: float = 0.75  # Brier score weight
     oracle_temperature: float = 1.0
-    # Dr. GRPO: "none" = don't scale by std (recommended), "group" = original GRPO, "batch" = batch-level std
+    # Dr. GRPO: "none" = don't scale by std (recommended), "group" = original GRPO
     scale_rewards: str = "none"
-    # Dr. GRPO length bias fix: if True, don't divide loss by response length
+    # Dr. GRPO length bias fix: normalize by global constant (max_tokens * G) not response length
     fix_length_bias: bool = True
 
     # Training
     learning_rate: float = 3e-6
     max_grad_norm: float = 1.0
-    max_new_tokens: int = 80
+    max_new_tokens: int = 300  # Allow longer AO responses
+    gradient_accumulation_steps: int = 4  # Compensate for smaller per-step batch
 
     # Logging
     log_samples_every: int = 10
@@ -44,13 +46,13 @@ class GRPOConfig:
     # Paths
     save_dir: str = "checkpoints"
     push_to_hub: bool = True
-    hub_repo_id: str = "ceselder/grpo-activation-oracle-qwen3-8b"
+    hub_repo_id: str = "ceselder/grpo-activation-oracle-gemma2-9b"
 
-    # Judge (Gemini 3 Flash via OpenRouter with CoT)
-    judge_model: str = "google/gemini-3-flash-preview"
-    judge_max_tokens: int = 1000  # Allow CoT reasoning
+    # Judge (GLM-4.7 Flash via OpenRouter - fast)
+    judge_model: str = "z-ai/glm-4.7-flash"
+    judge_max_tokens: int = 5000  # Full CoT
     judge_thinking_level: str = "low"  # minimal/low/medium/high
-    judge_temperature: float = 0.0
+    judge_temperature: float = 0.5
 
     # Evaluation
     eval_at_checkpoints: bool = True
@@ -68,21 +70,22 @@ class GRPOConfig:
             self.wandb_run_name = f"grpo_{model_short}_g{self.num_generations}"
 
 
-JUDGE_PROMPT = """Rate how informative and correct this answer is about the text.
+JUDGE_PROMPT = """You are evaluating an Activation Oracle (AO) - a model that reads the internal activations (hidden states) of another model while it processes text, and answers questions about what the model is "thinking".
 
-TEXT: {prompt}
+The AO has been shown the activations from a model processing this TEXT:
+{prompt}
 
-QUESTION: {question}
+The AO was asked this QUESTION about the model's internal state:
+{question}
 
-ANSWER: {answer}
+The AO gave this ANSWER:
+{answer}
 
-Score from -100 to 100:
-- -100 to -50: Confidently wrong, harmful misinformation
-- -50 to 0: Wrong or nonsensical
-- 0 to 20: Vague hedge that could apply to anything
-- 20 to 40: Partially correct but missing key details
-- 40 to 60: Correct with some relevant detail
-- 60 to 80: Correct with good specificity
-- 80 to 100: Excellent - correct, specific, captures nuance
+Rate how informative and correct this answer is. Score from 0 to 100:
+- 0-20: Confidently wrong, nonsensical, or completely unrelated
+- 20-40: Wrong or vague hedge that could apply to anything
+- 40-60: Partially correct but missing key details or too generic
+- 60-80: Correct with relevant specific details
+- 80-100: Excellent - specific, insightful, captures nuances about model's processing
 
 Think through your reasoning, then output your final score as an integer on the last line."""

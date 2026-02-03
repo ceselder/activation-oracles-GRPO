@@ -17,9 +17,9 @@ Questions probe **SEMANTIC CONTENT** encoded in neural activations - what concep
 
 ## Stats
 - Examples: 100
-- Total questions: 904
-- Binary questions: 757 (83.7%)
-- Generation cost: $0.0427
+- Total questions: 772
+- Binary questions: 420 (54.4%)
+- Generation cost: $0.0044
 - Model: google/gemini-3-flash-preview
 
 ## Format

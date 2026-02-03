@@ -99,11 +99,18 @@ Use the FULL range based on signal clarity:
 - 80: strong signal, very confident
 - 60: decent signal, somewhat confident
 - 40: weak signal, somewhat uncertain
-- 20: very weak signal, mostly guessing
-- 5: basically no signal, pure guess
+
+etc...
+
+IMPORTANT: if you are certain that you DON'T KNOW: don't get confused!
+
+[epistemic status: 100] I can't answer this question given these activations.
+
+is a valid answer!
 
 Examples:
-[epistemic status: 95] Yes
-[epistemic status: 35] No
+[epistemic status: 65] Yes
+[epistemic status: 68] No
+[epistemic status: 87] I can't answer this question given these activations.
 [epistemic status: 72] The user is asking about Python debugging.
-[epistemic status: 15] Maybe about cooking?"""
+[epistemic status: 15] The question is about cooking (but model is uncertain)"""

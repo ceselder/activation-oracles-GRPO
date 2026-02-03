@@ -23,7 +23,7 @@ from nl_probes.utils.dataset_utils import get_introspection_prefix, SPECIAL_TOKE
 sys.path.insert(0, "/root/rest-activation-oracles")
 from grpo_ao.epistemic_status import parse_oracle_output, format_epistemic_output, ORACLE_SYSTEM_PROMPT
 from grpo_ao.reward import compute_reward
-from grpo_ao.config import QUESTION_TEMPLATES
+# Removed: QUESTION_TEMPLATES (was for local question generation, now using external LLM)
 
 
 def main():

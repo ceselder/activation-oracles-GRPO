@@ -1,269 +1,275 @@
 #!/usr/bin/env python3
 """
-Generate WildChat prompts with oracle probe questions.
-Uses Gemini 3 Flash with low reasoning effort.
-Focus: Questions HARD to answer from activations but EASY to judge externally.
+Generate oracle probe questions for REAL WildChat prompts.
+PARALLEL + BATCHED for maximum speed.
 """
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+from datasets import load_dataset
+
+sys.stdout.reconfigure(line_buffering=True)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MODEL = "google/gemini-3-flash-preview"
+MODEL = "google/gemini-2.5-flash"
 OUTPUT_PATH = Path(__file__).parent / "datasets" / "wildchat_oracle_questions.jsonl"
 
-# Gemini 3 Flash pricing
-PRICE_PER_M_INPUT = 0.50
-PRICE_PER_M_OUTPUT = 3.00
+PRICE_PER_M_INPUT = 0.15
+PRICE_PER_M_OUTPUT = 0.60
 
-PROMPT_TEMPLATE = """Generate 15 training examples for an activation oracle. For each example:
-1. A realistic user message (like WildChat/ShareGPT)
-2. 8-12 probe questions - MIX of model-focused AND user-focused questions
+BATCH_SIZE = 20  # Messages per API call
+PARALLEL_REQUESTS = 8  # Concurrent API calls
 
-QUESTION DESIGN PRINCIPLES:
+QUESTION_PROMPT = """You are helping create training data for an "activation oracle" - a model that reads the internal activations of another language model and answers questions about what that model is processing.
 
-1. SUBTLE DISTINCTIONS (not obvious yes/no):
-   - "Is the user frustrated or just confused?" (requires nuance)
-   - "Is this a complaint or a request for help?" (often ambiguous)
-   - "Is the tone sarcastic or genuinely enthusiastic?"
-   - "Is the user venting or seeking advice?"
+For EACH of the following {n} user messages, generate 8 probe questions that are RELEVANT to each message.
 
-2. HARD NEGATIVES (plausibly related but wrong):
-   - For a Python debugging question: "Is this about web development?" (related but wrong)
-   - For relationship advice: "Is this about friendship issues?" (close but different)
-   - For a recipe request: "Is this about nutrition advice?" (food-related but wrong)
-   DON'T use obviously wrong negatives like "Is this about space travel?" for a cooking question.
+Make the questions progressively harder given your intuitions what is recoverable from activations.
 
-3. DEGREE/SPECTRUM QUESTIONS:
-   - "How technical is this message?"
-   - "Is the user slightly annoyed or very angry?"
-   - "Is this formal, casual, or somewhere in between?"
+Ask about a broad range of things EACH QUESTION SHOULD BE ABOUT SOMEHTHING ELSE, and phrase in various ways:
 
-4. MODEL-FOCUSED (vary phrasing):
-   - "What is the model thinking about?"
-   - "Is the model processing a technical problem?"
-   - "Does this involve [concept]?"
-   - "Is the model detecting [emotion]?"
+examples: "what is the model thinking about?", "what is the question about", "is the user angry right now?", "what are the main things the model is thinking about?" etc...
 
-5. USER-FOCUSED:
-   - "What does the user want?"
-   - "Is the user experienced with this topic?"
-   - "What's the user's emotional state?"
+4 of these questions should be binary questions, and you should say explicitly "ANSWER ONLY WITH YES OR NO"
 
-REQUIREMENTS:
-- ~50% should have NEGATIVE answers, but make them HARD negatives (plausibly related)
-- ~40% YES/NO questions (answer is just "Yes" or "No")
-- ~60% open-ended questions (answer is a phrase/sentence)
-- Include subtle distinction questions
-- Vary phrasing
-- All questions must be verifiable by reading the text
+FORMAT (follow exactly):
+===MSG 1===
+- Question 1
+- Question 2
+...
+===MSG 2===
+- Question 1
+...
 
-Format:
-===
-USER: [realistic user message]
-QUESTIONS:
-- Is this about programming?
-- Is the model detecting frustration?
-- Is this about web development?
-- What is the main topic?
-- Is the user seeking advice or venting?
-- Is the tone formal?
-- Does this involve databases?
-- What does the user want?
-===
+MESSAGES:
+{messages}
 
-Topics: coding, creative writing, relationship advice, casual chat, homework, roleplay, travel, food, science, philosophy, gaming, work problems, health, tech support.
-
-Generate 15 examples with CHALLENGING questions:"""
+Generate 8 relevant questions for EACH message:"""
 
 
-def fetch_batch() -> tuple[list[dict], int, int]:
-    response = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": MODEL,
-            "messages": [{"role": "user", "content": PROMPT_TEMPLATE}],
-            "temperature": 1.0,
-            "max_tokens": 8000,
-            "thinking": {"type": "enabled", "budget_tokens": 1000},  # Low reasoning
-        },
-    )
-    response.raise_for_status()
-    data = response.json()
+def fetch_wildchat_samples(n: int) -> list[str]:
+    """Fetch real user messages from WildChat dataset."""
+    print(f"Loading WildChat dataset (target: {n} messages)...")
+    ds = load_dataset("allenai/WildChat-1M", split="train", streaming=True)
 
-    content = data["choices"][0]["message"]["content"]
-    usage = data.get("usage", {})
-    input_tokens = usage.get("prompt_tokens", 0)
-    output_tokens = usage.get("completion_tokens", 0)
+    messages = []
+    for i, example in enumerate(ds):
+        if len(messages) >= n:
+            break
+        if i % 50000 == 0 and i > 0:
+            print(f"  Scanned {i}, got {len(messages)}...", flush=True)
+        conv = example.get("conversation", [])
+        if conv and conv[0].get("role") == "user":
+            msg = conv[0].get("content", "").strip()
+            if 80 < len(msg) < 1000 and msg[0].isascii():
+                words = msg.lower().split()
+                eng_words = ['the', 'is', 'are', 'can', 'you', 'how', 'what', 'help', 'my', 'i', 'a', 'to', 'and']
+                if sum(1 for w in eng_words if w in words) >= 2:
+                    messages.append(msg)
 
-    examples = []
-    blocks = content.split("===")
+    # Shuffle to get diverse samples
+    import random
+    random.shuffle(messages)
+    print(f"Got {len(messages)} English messages (shuffled)")
+    return messages
 
-    for block in blocks:
-        block = block.strip()
-        if not block or "USER:" not in block:
-            continue
 
-        lines = block.split("\n")
-        user_msg = ""
-        questions = []
-        in_questions = False
+def generate_questions_batch(batch_idx: int, user_messages: list[str]) -> tuple[int, list[tuple[str, list[str]]], int, int]:
+    """Generate probe questions for a batch of user messages. Returns (batch_idx, results, in_tok, out_tok)"""
+    formatted = "\n\n".join(f"[MSG {i+1}]: {msg[:600]}" for i, msg in enumerate(user_messages))
+    prompt = QUESTION_PROMPT.format(n=len(user_messages), messages=formatted)
 
-        for line in lines:
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.8,
+                "max_tokens": 5000,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+
+        # Parse questions for each message
+        all_questions = []
+        current_questions = []
+
+        for line in content.split("\n"):
             line = line.strip()
-            if line.startswith("USER:"):
-                user_msg = line[5:].strip()
-                in_questions = False
-            elif "QUESTIONS:" in line.upper():
-                in_questions = True
-            elif in_questions and (line.startswith("-") or line.startswith("*") or (line and line[0].isdigit())):
-                # Clean up question
-                q = line.lstrip("-*0123456789.) ").strip()
+            if line.startswith("===MSG") or line.startswith("=== MSG") or line.startswith("**MSG"):
+                if current_questions:
+                    all_questions.append(current_questions)
+                current_questions = []
+            elif line.startswith("-") or line.startswith("*"):
+                q = line.lstrip("-* ").strip()
                 if q and "?" in q:
-                    # Take up to and including the question mark
-                    q = q[:q.rindex("?") + 1]
-                    questions.append(q)
+                    current_questions.append(q)
 
-        if user_msg and len(questions) >= 3:
-            examples.append({
-                "wildchat_question": user_msg,
-                "language": "english",
-                "oracle_questions": questions,
-            })
+        if current_questions:
+            all_questions.append(current_questions)
 
-    return examples, input_tokens, output_tokens
+        # Match to messages
+        results = []
+        for i, msg in enumerate(user_messages):
+            if i < len(all_questions) and len(all_questions[i]) >= 3:
+                results.append((msg, all_questions[i]))
+
+        return batch_idx, results, input_tokens, output_tokens
+
+    except Exception as e:
+        print(f"  Batch {batch_idx} error: {e}", flush=True)
+        return batch_idx, [], 0, 0
 
 
 def main():
-    target = 100  # Small challenging dataset
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target", type=int, default=5000, help="Number of examples to generate")
+    parser.add_argument("--repo-suffix", type=str, default="", help="Suffix for HF repo name (e.g., '-mini')")
+    args = parser.parse_args()
+
+    target = args.target
     print(f"Target: {target} examples")
     print(f"Model: {MODEL}")
-    print(f"Pricing: ${PRICE_PER_M_INPUT}/M in, ${PRICE_PER_M_OUTPUT}/M out")
+    print(f"Batch: {BATCH_SIZE} msgs/call, {PARALLEL_REQUESTS} parallel")
     print(f"Output: {OUTPUT_PATH}\n")
+
+    messages = fetch_wildchat_samples(target + 500)
 
     all_examples = []
     total_input = 0
     total_output = 0
 
-    while len(all_examples) < target:
-        examples, in_tok, out_tok = fetch_batch()
-        total_input += in_tok
-        total_output += out_tok
+    # Create batches
+    batches = []
+    for i in range(0, len(messages), BATCH_SIZE):
+        batches.append(messages[i:i + BATCH_SIZE])
 
-        for ex in examples:
-            if len(all_examples) >= target:
-                break
-            ex["idx"] = len(all_examples)
-            all_examples.append(ex)
+    print(f"Created {len(batches)} batches, processing in parallel...\n")
+    start_time = time.time()
 
-        cost = (total_input * PRICE_PER_M_INPUT + total_output * PRICE_PER_M_OUTPUT) / 1_000_000
+    with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as executor:
+        batch_idx = 0
+        pending = {}
 
-        # Show sample every ~100
-        if len(all_examples) % 100 < 20 or len(all_examples) >= target:
-            print(f"\n=== {len(all_examples)}/{target} | ${cost:.4f} ===")
-            if examples:
-                ex = examples[0]
-                print(f"USER: {ex['wildchat_question'][:100]}...")
-                print(f"Qs ({len(ex['oracle_questions'])}):")
-                for q in ex['oracle_questions'][:4]:
-                    print(f"  - {q}")
+        while len(all_examples) < target and (batch_idx < len(batches) or pending):
+            # Submit new batches
+            while len(pending) < PARALLEL_REQUESTS and batch_idx < len(batches):
+                future = executor.submit(generate_questions_batch, batch_idx, batches[batch_idx])
+                pending[future] = batch_idx
+                batch_idx += 1
 
-        time.sleep(0.3)
+            # Wait for any to complete
+            done = []
+            for future in list(pending.keys()):
+                if future.done():
+                    done.append(future)
+
+            if not done:
+                time.sleep(0.1)
+                continue
+
+            for future in done:
+                del pending[future]
+                try:
+                    _, results, in_tok, out_tok = future.result()
+                    total_input += in_tok
+                    total_output += out_tok
+
+                    for msg, qs in results:
+                        if len(all_examples) >= target:
+                            break
+                        all_examples.append({
+                            "idx": len(all_examples),
+                            "wildchat_question": msg,
+                            "language": "english",
+                            "oracle_questions": qs,
+                        })
+                except Exception as e:
+                    print(f"  Future error: {e}", flush=True)
+
+            # Progress
+            cost = (total_input * PRICE_PER_M_INPUT + total_output * PRICE_PER_M_OUTPUT) / 1_000_000
+            elapsed = time.time() - start_time
+            rate = len(all_examples) / elapsed if elapsed > 0 else 0
+            eta = (target - len(all_examples)) / rate if rate > 0 else 0
+            pct = 100 * len(all_examples) / target
+            print(f"[{pct:5.1f}%] {len(all_examples):>5}/{target} | ${cost:.2f} | {rate:.0f}/s | ETA {eta/60:.1f}m", flush=True)
+
+    # Post-processing: mix in questions from OTHER examples as "unrelated" questions
+    # This gives natural diversity - questions about cooking when the prompt is about code, etc.
+    # BALANCED: add same number of unrelated as relevant (50/50 split)
+    import random
+    print("\nPost-processing: mixing in unrelated questions from other examples (50/50 balance)...")
+
+    for i, ex in enumerate(all_examples):
+        num_relevant = len(ex["oracle_questions"])
+        num_unrelated = num_relevant  # Same number for 50/50 balance
+
+        unrelated_questions = []
+        attempts = 0
+        while len(unrelated_questions) < num_unrelated and attempts < 100:
+            # Pick a random OTHER example
+            other_idx = random.randint(0, len(all_examples) - 1)
+            if other_idx != i:
+                other_qs = all_examples[other_idx]["oracle_questions"]
+                if other_qs:
+                    q = random.choice(other_qs)
+                    if q not in unrelated_questions and q not in ex["oracle_questions"]:
+                        unrelated_questions.append(q)
+            attempts += 1
+
+        # Add unrelated questions to this example
+        ex["oracle_questions"].extend(unrelated_questions)
+        ex["num_relevant"] = num_relevant
+        ex["num_unrelated"] = len(unrelated_questions)
+
+    avg_relevant = sum(ex["num_relevant"] for ex in all_examples) / len(all_examples)
+    avg_unrelated = sum(ex["num_unrelated"] for ex in all_examples) / len(all_examples)
+    print(f"Per example: ~{avg_relevant:.1f} relevant + ~{avg_unrelated:.1f} unrelated questions")
 
     # Save
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
-        for item in all_examples:
-            f.write(json.dumps(item) + "\n")
+        for ex in all_examples:
+            f.write(json.dumps(ex) + "\n")
 
     total_cost = (total_input * PRICE_PER_M_INPUT + total_output * PRICE_PER_M_OUTPUT) / 1_000_000
-
-    # Stats
     all_qs = [q for ex in all_examples for q in ex["oracle_questions"]]
-    binary_qs = sum(1 for q in all_qs if q.lower().startswith(("is ", "does ", "are ", "do ", "was ", "has ", "can ", "will ", "would ", "should ")))
-    topic_qs = sum(1 for q in all_qs if any(w in q.lower() for w in ["topic", "about", "subject", "domain"]))
-    emotion_qs = sum(1 for q in all_qs if any(w in q.lower() for w in ["frustrated", "angry", "happy", "anxious", "emotion", "feel", "mood", "tone"]))
+    yesno_qs = sum(1 for q in all_qs if "YES" in q and "NO" in q)
 
     print(f"\n{'='*50}")
-    print(f"DONE! {len(all_examples)} examples")
-    print(f"Total questions: {len(all_qs)}")
-    print(f"Binary questions: {binary_qs} ({100*binary_qs/len(all_qs):.1f}%)")
-    print(f"Topic probes: {topic_qs} ({100*topic_qs/len(all_qs):.1f}%)")
-    print(f"Emotion probes: {emotion_qs} ({100*emotion_qs/len(all_qs):.1f}%)")
-    print(f"Tokens: {total_input:,} in / {total_output:,} out")
-    print(f"TOTAL COST: ${total_cost:.4f}")
+    print(f"DONE! {len(all_examples)} examples, {len(all_qs)} questions")
+    print(f"YES/NO suffix: {yesno_qs}")
+    print(f"TOTAL COST: ${total_cost:.2f}")
     print(f"Saved to: {OUTPUT_PATH}")
 
     print("\nUploading to HuggingFace...")
-    upload_to_hf(all_examples, total_cost, len(all_qs), binary_qs)
-
-
-def upload_to_hf(examples, cost, total_qs, binary_qs):
-    import os
     from huggingface_hub import HfApi, login
     login(token=os.environ.get("HF_TOKEN"))
     api = HfApi()
-    repo_id = "ceselder/wildchat-oracle-questions"
+    repo_id = f"ceselder/wildchat-oracle-questions{args.repo_suffix}"
     api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
     api.upload_file(
         path_or_fileobj=str(OUTPUT_PATH),
         path_in_repo="wildchat_oracle_questions.jsonl",
-        repo_id=repo_id,
-        repo_type="dataset",
-    )
-
-    readme = f"""# WildChat Oracle Questions Dataset
-
-Training data for activation oracles: user prompts paired with semantic probe questions.
-
-## Design Principle
-
-Questions probe **SEMANTIC CONTENT** encoded in neural activations - what concepts, emotions, and intentions are being processed. ~50% have negative answers to test calibration.
-
-## Question Types
-
-- **Topic/domain**: "What is the main topic?", "Is this about cooking?"
-- **Emotion/sentiment**: "Is the user frustrated?", "What mood is conveyed?"
-- **Intent/goal**: "What does the user want?", "Is this asking for help?"
-- **Inference**: "Does the user seem experienced?", "Is this from a student?"
-- **Subtle distinctions**: "Confused or curious?", "Complaint or question?"
-- **Negative probes**: Wrong topics/emotions to get "No" answers
-
-## Stats
-- Examples: {len(examples)}
-- Total questions: {total_qs}
-- Binary questions: {binary_qs} ({100*binary_qs/total_qs:.1f}%)
-- Generation cost: ${cost:.4f}
-- Model: google/gemini-3-flash-preview
-
-## Format
-```json
-{{
-  "wildchat_question": "user message...",
-  "language": "english",
-  "oracle_questions": ["What is the main topic?", "Is the user frustrated?", ...]
-}}
-```
-
-## Usage
-```python
-from datasets import load_dataset
-ds = load_dataset("ceselder/wildchat-oracle-questions")
-```
-"""
-    readme_path = OUTPUT_PATH.parent / "README.md"
-    with open(readme_path, "w") as f:
-        f.write(readme)
-    api.upload_file(
-        path_or_fileobj=str(readme_path),
-        path_in_repo="README.md",
         repo_id=repo_id,
         repo_type="dataset",
     )

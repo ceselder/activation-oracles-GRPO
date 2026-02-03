@@ -49,6 +49,18 @@ from nl_probes.utils.common import load_tokenizer, set_seed
 from nl_probes.utils.dataset_utils import get_introspection_prefix, SPECIAL_TOKEN
 
 
+def format_messages_for_model(system_prompt: str, user_content: str, assistant_content: str | None = None) -> list[dict]:
+    """Format messages, merging system into user for Gemma 2 compatibility."""
+    merged_user = f"{system_prompt}\n\n{user_content}"
+    if assistant_content is not None:
+        return [
+            {"role": "user", "content": merged_user},
+            {"role": "assistant", "content": assistant_content},
+        ]
+    else:
+        return [{"role": "user", "content": merged_user}]
+
+
 def random_confidence() -> int:
     """Generate varied confidence levels across the full range."""
     # Mix of distributions to get good coverage
@@ -270,12 +282,8 @@ def train_sft(cfg: GRPOConfig, sft_examples: list[dict], num_steps: int = 200):
         # Sample example
         ex = random.choice(sft_examples)
 
-        # Build input with system prompt
-        messages = [
-            {"role": "system", "content": ORACLE_SYSTEM_PROMPT},
-            {"role": "user", "content": ex["prefix"] + ex["question"]},
-            {"role": "assistant", "content": ex["answer"]},
-        ]
+        # Build input with system prompt merged into user (Gemma 2 compatibility)
+        messages = format_messages_for_model(ORACLE_SYSTEM_PROMPT, ex["prefix"] + ex["question"], ex["answer"])
 
         try:
             full_encoded = tokenizer.apply_chat_template(

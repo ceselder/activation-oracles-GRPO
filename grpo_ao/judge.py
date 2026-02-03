@@ -25,19 +25,18 @@ class JudgeResult:
 
 
 def _parse_score(response: str) -> float | None:
-    """Parse a -100 to 100 score from judge response and normalize to 0-1."""
+    """Parse a 0 to 100 score from judge response and normalize to 0-1."""
     response = response.strip()
 
     # Look for the last number in the response (final score after CoT)
-    # Match integers, possibly negative
-    matches = re.findall(r"-?\d+", response)
+    matches = re.findall(r"\d+", response)
     if matches:
         try:
             # Take the last number (final answer after reasoning)
             score = int(matches[-1])
-            # Clamp to [-100, 100] and normalize to [0, 1]
-            score = max(-100, min(100, score))
-            return (score + 100) / 200.0  # -100 -> 0, 0 -> 0.5, 100 -> 1
+            # Clamp to [0, 100] and normalize to [0, 1]
+            score = max(0, min(100, score))
+            return score / 100.0  # 0 -> 0, 50 -> 0.5, 100 -> 1
         except ValueError:
             pass
 
@@ -97,16 +96,21 @@ class InformativenessJudge:
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a judge that rates answer quality. Think through your reasoning, then output your final score as an integer from -100 to 100 on the last line."},
+            # Build request - only add thinking param for Gemini models
+            kwargs = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "You are a judge that rates answer quality. Think through your reasoning, then output your final score as an integer from 0 to 100 on the last line."},
                     {"role": "user", "content": judge_prompt},
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": self.max_tokens // 2}},
-            )
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+            # Only add thinking for Gemini models
+            if "gemini" in self.model.lower():
+                kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": self.max_tokens // 2}}
+
+            response = await self.client.chat.completions.create(**kwargs)
             raw = response.choices[0].message.content or ""
             score = _parse_score(raw)
 

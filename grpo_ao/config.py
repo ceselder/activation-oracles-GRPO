@@ -27,6 +27,7 @@ class GRPOConfig:
     calibration_lambda: float = 1.0  # Brier score weight (was 0.75, increased for calibration pressure)
     confidence_entropy_bonus: float = 0.15  # Bonus for confidence diversity within group
     oracle_temperature: float = 1.2  # Slightly higher for more exploration
+    calibration_only: bool = False  # Phase 2: only train confidence token, reward = -brier
     # Dr. GRPO: "none" = don't scale by std (recommended), "group" = original GRPO
     scale_rewards: str = "none"
     # Dr. GRPO length bias fix: normalize by global constant (max_tokens * G) not response length

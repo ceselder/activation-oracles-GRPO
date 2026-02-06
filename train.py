@@ -53,6 +53,8 @@ def main():
                         help="HuggingFace Hub repo ID")
     parser.add_argument("--compile", action="store_true", default=False,
                         help="Enable torch.compile (usually breaks with steering hooks)")
+    parser.add_argument("--calibration", action="store_true", default=False,
+                        help="Phase 2: calibration-only training (only train confidence token, reward = -brier)")
 
     args = parser.parse_args()
 
@@ -72,7 +74,15 @@ def main():
         push_to_hub=not args.no_push,
         hub_repo_id=args.hub_repo_id,
         use_torch_compile=args.compile,
+        calibration_only=args.calibration,
     )
+
+    # Phase 2 overrides: G=1, many examples per batch for cross-input diversity
+    if args.calibration:
+        cfg.num_generations = 1
+        cfg.examples_per_batch = 16  # 16 diverse inputs per batch (was 4×8=32 rollouts, now 16×1=16)
+        cfg.gradient_accumulation_steps = 2  # 32 diverse inputs per optimizer step
+        print("Phase 2 (calibration): G=1, 16 examples/batch, global advantages")
 
     print("=" * 60)
     print("GRPO Activation Oracle Training")

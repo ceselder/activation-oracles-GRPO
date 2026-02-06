@@ -458,7 +458,7 @@ class GRPOTrainer:
                 full_encoded = self.tokenizer.apply_chat_template(
                     messages, tokenize=True, add_generation_prompt=False, return_tensors=None
                 )
-            full_ids_list = full_encoded.input_ids if hasattr(full_encoded, 'input_ids') else list(full_encoded)
+            full_ids_list = full_encoded["input_ids"] if hasattr(full_encoded, 'keys') else list(full_encoded)
             input_ids = torch.tensor([full_ids_list], device=self.device)
 
             # Create labels (mask prompt)
@@ -471,7 +471,7 @@ class GRPOTrainer:
                 prompt_encoded = self.tokenizer.apply_chat_template(
                     messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None
                 )
-            prompt_ids_list = prompt_encoded.input_ids if hasattr(prompt_encoded, 'input_ids') else list(prompt_encoded)
+            prompt_ids_list = prompt_encoded["input_ids"] if hasattr(prompt_encoded, 'keys') else list(prompt_encoded)
             labels = input_ids.clone()
             labels[0, :len(prompt_ids_list)] = -100
 
@@ -528,15 +528,60 @@ class GRPOTrainer:
                 self._max_log_ratio = total_max_log_ratio
                 self._clipfrac = getattr(self, '_clipfrac', 0.0) + clipfrac
 
-            # Dr. GRPO length bias fix: multiply by response length to get sum of token losses
-            loss = outputs.loss
-            if self.cfg.fix_length_bias:
-                response_len = (labels[0] != -100).sum().item()
-                if response_len > 0:
-                    loss = loss * response_len  # Convert mean -> sum
+            # Compute per-token loss manually for masking support
+            logits_for_loss = outputs.logits[:, :-1, :]  # [1, seq_len-1, vocab]
+            targets_for_loss = input_ids[:, 1:]  # [1, seq_len-1]
+            per_token_loss = F.cross_entropy(
+                logits_for_loss.reshape(-1, logits_for_loss.size(-1)),
+                targets_for_loss.reshape(-1),
+                reduction='none',
+            ).reshape(1, -1)  # [1, seq_len-1]
+
+            # Response mask: where labels != -100 (excludes prompt)
+            response_mask = (labels[:, 1:] != -100).float()  # [1, seq_len-1]
+
+            if self.cfg.calibration_only:
+                # Phase 2: only backprop through the confidence number token
+                # Find the epistemic status number in the response
+                # Response starts with: [epistemic status: X] ...
+                conf_mask = torch.zeros_like(response_mask)
+                response_start = len(prompt_ids_list)
+                # Search response tokens for the digit after "status:"
+                found_colon = False
+                for pos in range(response_start, min(response_start + 20, len(full_ids_list) - 1)):
+                    tok_str = self.tokenizer.decode([full_ids_list[pos]])
+                    stripped = tok_str.strip()
+                    if ":" in tok_str:
+                        found_colon = True
+                        continue
+                    if found_colon and stripped and any(c.isdigit() for c in stripped):
+                        # Found the confidence digit token after ":"
+                        # pos in full_ids_list -> pos-1 in the shifted loss tensor
+                        if pos - 1 < conf_mask.size(1):
+                            conf_mask[0, pos - 1] = 1.0
+                            if not hasattr(self, '_logged_conf_mask'):
+                                print(f"  [calibration] Masking token at pos {pos}: '{tok_str}' (response_start={response_start})")
+                                self._logged_conf_mask = True
+                        break
+                # Fallback: if no digit found, use full response mask
+                if conf_mask.sum() == 0:
+                    if not hasattr(self, '_logged_conf_fallback'):
+                        resp_tokens = [self.tokenizer.decode([full_ids_list[p]]) for p in range(response_start, min(response_start + 15, len(full_ids_list)))]
+                        print(f"  [calibration] WARNING: no conf digit found, falling back to full mask. First response tokens: {resp_tokens}")
+                        self._logged_conf_fallback = True
+                    conf_mask = response_mask
+                loss_mask = conf_mask
+            else:
+                loss_mask = response_mask
+
+            # Apply mask and compute loss
+            masked_loss = (per_token_loss * loss_mask).sum()
+            if not self.cfg.fix_length_bias:
+                # Mean over masked tokens
+                masked_loss = masked_loss / loss_mask.sum().clamp(min=1)
 
             # Weight loss by advantage (GRPO: positive advantage = reinforce, negative = penalize)
-            total_loss += loss * advantage
+            total_loss += masked_loss * advantage
 
         # Add KL penalty to loss
         if self.cfg.kl_penalty > 0:
@@ -615,32 +660,66 @@ class GRPOTrainer:
 
         judge_results = self.judge.score_batch_sync(all_prompts, all_questions, all_answers)
 
-        # Step 4: Compute rewards and advantages per example, accumulate loss
-        all_metrics = []
-        total_scaled_loss = 0.0
+        # Step 4: Compute rewards and advantages, accumulate loss
+        # First compute all rewards
+        all_rewards = []  # flat list of N*G rewards
+        for i in range(N):
+            parsed = all_parsed[i*G : (i+1)*G]
+            judge_res = judge_results[i*G : (i+1)*G]
+            for p, j in zip(parsed, judge_res):
+                r = compute_reward(p, j.informativeness, self.cfg.calibration_lambda)
+                all_rewards.append(r)
 
+        if self.cfg.calibration_only:
+            # Phase 2: reward = -brier_score, advantages computed GLOBALLY across all N*G
+            # This gives cross-input signal: high conf on easy Q rewarded, low conf on hard Q rewarded
+            for r in all_rewards:
+                if r.parse_success:
+                    r.reward = -r.brier_score
+                else:
+                    r.reward = -1.0
+            global_reward_vals = [r.reward for r in all_rewards]
+            global_mean = sum(global_reward_vals) / len(global_reward_vals)
+            all_advantages = [r - global_mean for r in global_reward_vals]
+        else:
+            # Phase 1: per-group advantages (standard GRPO)
+            all_advantages = []
+            for i in range(N):
+                rewards = all_rewards[i*G : (i+1)*G]
+                # Entropy bonus
+                if self.cfg.confidence_entropy_bonus > 0:
+                    confs = [r.confidence for r in rewards if r.parse_success]
+                    if len(confs) >= 2:
+                        from collections import Counter
+                        conf_counts = Counter(confs)
+                        n = len(confs)
+                        for r in rewards:
+                            if r.parse_success:
+                                freq = conf_counts[r.confidence] / n
+                                bonus = self.cfg.confidence_entropy_bonus * (1.0 - freq)
+                                r.reward += bonus
+
+                reward_vals = [r.reward for r in rewards]
+                mean_reward = sum(reward_vals) / len(reward_vals)
+                std_reward = (sum((r - mean_reward)**2 for r in reward_vals) / len(reward_vals)) ** 0.5
+                if self.cfg.scale_rewards == "none":
+                    advantages = [r - mean_reward for r in reward_vals]
+                elif self.cfg.scale_rewards == "group" and std_reward > 1e-8:
+                    advantages = [(r - mean_reward) / std_reward for r in reward_vals]
+                else:
+                    advantages = [0.0] * len(reward_vals)
+                all_advantages.extend(advantages)
+
+        all_metrics = []
         self.model.train()
         for i, ex in enumerate(prepared):
             responses = all_responses[i]
-            parsed = all_parsed[i*G : (i+1)*G]
-            judge_res = judge_results[i*G : (i+1)*G]
-
-            rewards = []
-            for p, j in zip(parsed, judge_res):
-                r = compute_reward(p, j.informativeness, self.cfg.calibration_lambda)
-                rewards.append(r)
+            rewards = all_rewards[i*G : (i+1)*G]
+            advantages = all_advantages[i*G : (i+1)*G]
 
             reward_vals = [r.reward for r in rewards]
             mean_reward = sum(reward_vals) / len(reward_vals)
             std_reward = (sum((r - mean_reward)**2 for r in reward_vals) / len(reward_vals)) ** 0.5
-
-            # Dr. GRPO: center, don't scale
-            if self.cfg.scale_rewards == "none":
-                advantages = [r - mean_reward for r in reward_vals]
-            elif self.cfg.scale_rewards == "group" and std_reward > 1e-8:
-                advantages = [(r - mean_reward) / std_reward for r in reward_vals]
-            else:
-                advantages = [0.0] * len(reward_vals)
 
             # Compute loss for this example
             loss, loss_metrics = self.compute_grpo_loss(
@@ -653,6 +732,7 @@ class GRPOTrainer:
             scaled_loss = loss / scale
             scaled_loss.backward()
 
+            conf_vals = [r.confidence for r in rewards if r.parse_success]
             all_metrics.append({
                 "loss": loss.item(),
                 "mean_reward": mean_reward,
@@ -661,6 +741,7 @@ class GRPOTrainer:
                 "mean_informativeness": sum(r.informativeness for r in rewards) / len(rewards),
                 "mean_brier": sum(r.brier_score for r in rewards) / len(rewards),
                 "advantage_std": (sum(a**2 for a in advantages) / len(advantages)) ** 0.5,
+                "n_unique_confidences": len(set(conf_vals)) if conf_vals else 0,
                 **loss_metrics,  # mean_kl, max_log_ratio, clipfrac
             })
 
@@ -674,7 +755,16 @@ class GRPOTrainer:
         last_responses = all_responses[-1]
         last_rewards = []
         for p, j in zip(all_parsed[-G:], judge_results[-G:]):
-            last_rewards.append(compute_reward(p, j.informativeness, self.cfg.calibration_lambda))
+            r = compute_reward(p, j.informativeness, self.cfg.calibration_lambda)
+            last_rewards.append(r)
+
+        # Apply same reward override for display consistency
+        if self.cfg.calibration_only:
+            for r in last_rewards:
+                if r.parse_success:
+                    r.reward = -r.brier_score
+                else:
+                    r.reward = -1.0
 
         return avg_metrics, last_responses, last_rewards, last_ex["question"], last_ex["prompt"]
 
@@ -720,22 +810,27 @@ class GRPOTrainer:
             r = compute_reward(p, j.informativeness, self.cfg.calibration_lambda)
             rewards.append(r)
 
-        # Confidence entropy bonus: reward generations whose confidence differs from group mode
-        # This breaks the "always pick 7" equilibrium by making diversity profitable
-        if self.cfg.confidence_entropy_bonus > 0:
-            confs = [r.confidence for r in rewards if r.parse_success]
-            if len(confs) >= 2:
-                from collections import Counter
-                conf_counts = Counter(confs)
-                n = len(confs)
-                # Each response gets bonus proportional to how rare its confidence is
-                # Rare confidence = high bonus, modal confidence = low bonus
-                for r in rewards:
-                    if r.parse_success:
-                        freq = conf_counts[r.confidence] / n
-                        # bonus = entropy_coeff * (1 - freq), so unique conf gets ~full bonus
-                        bonus = self.cfg.confidence_entropy_bonus * (1.0 - freq)
-                        r.reward += bonus
+        if self.cfg.calibration_only:
+            # Phase 2: reward = -brier_score (pure calibration, no informativeness)
+            # Lower Brier = better calibration = higher reward
+            for r in rewards:
+                if r.parse_success:
+                    r.reward = -r.brier_score
+                else:
+                    r.reward = -1.0  # Worst possible Brier
+        else:
+            # Phase 1: Confidence entropy bonus to break collapse
+            if self.cfg.confidence_entropy_bonus > 0:
+                confs = [r.confidence for r in rewards if r.parse_success]
+                if len(confs) >= 2:
+                    from collections import Counter
+                    conf_counts = Counter(confs)
+                    n = len(confs)
+                    for r in rewards:
+                        if r.parse_success:
+                            freq = conf_counts[r.confidence] / n
+                            bonus = self.cfg.confidence_entropy_bonus * (1.0 - freq)
+                            r.reward += bonus
 
         reward_vals = [r.reward for r in rewards]
         mean_reward = sum(reward_vals) / len(reward_vals)
@@ -1027,7 +1122,7 @@ class GRPOTrainer:
                     sample_table = []
                     for i, (resp, rew) in enumerate(zip(responses[:3], rewards[:3])):
                         parsed = parse_oracle_output(resp)
-                        print(f"  [{i+1}] conf={rew.confidence}/100 info={rew.informativeness:.2f} reward={rew.reward:.3f}")
+                        print(f"  [{i+1}] conf={rew.confidence}/10 info={rew.informativeness:.2f} reward={rew.reward:.3f}")
                         # Show full response (up to 300 chars)
                         print(f"      {resp[:300]}")
                         sample_table.append([rew.confidence, rew.informativeness, rew.reward, resp[:200]])

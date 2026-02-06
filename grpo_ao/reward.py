@@ -64,7 +64,7 @@ def compute_reward(
             parse_success=False,
         )
 
-    confidence = oracle_output.confidence  # 0-100
+    confidence = oracle_output.confidence  # 0-10
     confidence_norm = oracle_output.confidence_normalized  # 0-1
     brier = (confidence_norm - informativeness) ** 2
 

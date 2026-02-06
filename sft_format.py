@@ -11,6 +11,7 @@ Strategy:
 """
 
 import argparse
+import asyncio
 import os
 import random
 from pathlib import Path
@@ -28,6 +29,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 from datasets import load_dataset
+from openai import AsyncOpenAI
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
@@ -47,6 +49,90 @@ for path in [
 from nl_probes.utils.steering_hooks import add_hook, get_hf_activation_steering_hook
 from nl_probes.utils.common import load_tokenizer, set_seed
 from nl_probes.utils.dataset_utils import get_introspection_prefix, SPECIAL_TOKEN
+
+
+EXPAND_PROMPT = """An Activation Oracle reads the internal activations (hidden states) of a language model and answers questions about what the model is "thinking".
+
+The oracle was reading activations from a model processing this text:
+{prompt}
+
+It was asked: {question}
+
+The oracle's raw probe output was: "{answer}"
+
+Expand this into a 1-2 sentence activation oracle response. The response should:
+- Start with the core answer from the probe
+- Add plausible detail about what the model's activations reveal
+- Sound like it's interpreting neural activations, not just answering the question
+- Be concise (1-2 sentences, max 50 words)
+
+Write ONLY the expanded response, nothing else."""
+
+
+def is_binary_question(question: str) -> bool:
+    """Check if a question expects a yes/no answer."""
+    q = question.strip().lower()
+    return (
+        q.startswith(("is ", "does ", "are ", "do ", "was ", "were ", "has ", "have ",
+                       "can ", "could ", "will ", "would ", "should ", "did "))
+        or "yes or no" in q
+    )
+
+
+async def expand_terse_answers(
+    examples: list[dict],
+    model: str = "google/gemini-2.5-flash-lite",
+    max_concurrent: int = 30,
+) -> list[dict]:
+    """Expand terse oracle answers for open-ended questions via LLM."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("WARNING: No OPENROUTER_API_KEY, skipping answer expansion")
+        return examples
+
+    client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    to_expand = []
+    for i, ex in enumerate(examples):
+        raw = ex["raw_answer"]
+        # Expand if: open-ended question AND terse answer (<=3 words)
+        if not is_binary_question(ex["question"]) and len(raw.split()) <= 3:
+            to_expand.append(i)
+
+    print(f"Expanding {len(to_expand)}/{len(examples)} terse open-ended answers...")
+
+    async def _expand_one(idx: int) -> tuple[int, str]:
+        ex = examples[idx]
+        prompt_text = EXPAND_PROMPT.format(
+            prompt=ex["prompt"][:500],
+            question=ex["question"],
+            answer=ex["raw_answer"],
+        )
+        async with semaphore:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    temperature=0.7,
+                    max_tokens=100,
+                )
+                expanded = resp.choices[0].message.content.strip()
+                return idx, expanded
+            except Exception as e:
+                print(f"  Expansion failed for {idx}: {e}")
+                return idx, ex["raw_answer"]  # keep original on failure
+
+    tasks = [_expand_one(i) for i in to_expand]
+    results = await asyncio.gather(*tasks)
+
+    for idx, expanded in results:
+        if expanded:
+            examples[idx]["raw_answer"] = expanded
+            conf = examples[idx]["confidence"]
+            examples[idx]["answer"] = format_epistemic_output(conf, expanded)
+
+    return examples
 
 
 def format_messages_for_model(system_prompt: str, user_content: str, assistant_content: str | None = None) -> list[dict]:
@@ -116,7 +202,12 @@ def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
         questions = example["oracle_questions"]
 
         # Pick random question and layer
-        question = random.choice(questions)
+        # Strip binary constraints so model can elaborate
+        cleaned_questions = [
+            q.replace(" ANSWER ONLY WITH YES OR NO", "").replace("ANSWER ONLY WITH YES OR NO", "").strip()
+            for q in questions
+        ]
+        question = random.choice(cleaned_questions)
         layer_percent = random.choice(cfg.layer_percents)
 
         # Extract activations
@@ -160,7 +251,7 @@ def generate_sft_data(cfg: GRPOConfig, num_examples: int = 500) -> list[dict]:
                 messages, tokenize=True, add_generation_prompt=True, return_tensors=None
             )
 
-        input_ids_list = encoded.input_ids if hasattr(encoded, 'input_ids') else list(encoded)
+        input_ids_list = encoded["input_ids"] if hasattr(encoded, 'keys') else list(encoded)
         gen_input_ids = torch.tensor([input_ids_list], device=device)
 
         special_token_id = tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
@@ -279,7 +370,7 @@ def train_sft(cfg: GRPOConfig, sft_examples: list[dict], num_steps: int = 200):
                 messages, tokenize=True, add_generation_prompt=False, return_tensors=None
             )
 
-        full_ids = full_encoded.input_ids if hasattr(full_encoded, 'input_ids') else list(full_encoded)
+        full_ids = full_encoded["input_ids"] if hasattr(full_encoded, 'keys') else list(full_encoded)
         input_ids = torch.tensor([full_ids], device=device)
 
         # Create labels (mask prompt)
@@ -292,7 +383,7 @@ def train_sft(cfg: GRPOConfig, sft_examples: list[dict], num_steps: int = 200):
             prompt_encoded = tokenizer.apply_chat_template(
                 messages[:-1], tokenize=True, add_generation_prompt=True, return_tensors=None
             )
-        prompt_ids = prompt_encoded.input_ids if hasattr(prompt_encoded, 'input_ids') else list(prompt_encoded)
+        prompt_ids = prompt_encoded["input_ids"] if hasattr(prompt_encoded, 'keys') else list(prompt_encoded)
         labels = input_ids.clone()
         labels[0, :len(prompt_ids)] = -100
 
@@ -363,13 +454,21 @@ def main():
     parser = argparse.ArgumentParser(description="SFT to teach epistemic status format")
     parser.add_argument("--num_examples", type=int, default=500,
                         help="Number of SFT examples to generate")
-    parser.add_argument("--num_steps", type=int, default=200,
-                        help="Number of SFT training steps")
+    parser.add_argument("--num_steps", type=int, default=1000,
+                        help="Number of SFT training steps (>=2 epochs recommended)")
     parser.add_argument("--skip_generation", action="store_true",
                         help="Skip data generation, load from cache")
+    parser.add_argument("--skip_expansion", action="store_true",
+                        help="Skip LLM answer expansion (for offline use)")
+    parser.add_argument("--oracle_lora", type=str,
+                        default="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
+                        help="Base oracle LoRA to start SFT from (NOT a previous SFT checkpoint)")
+    parser.add_argument("--push_to_hub", type=str, default="",
+                        help="Push checkpoint to HuggingFace Hub repo ID")
     args = parser.parse_args()
 
     cfg = GRPOConfig()
+    cfg.oracle_lora_path = args.oracle_lora
     cache_path = Path(cfg.save_dir) / "sft_data.pt"
 
     if args.skip_generation and cache_path.exists():
@@ -377,6 +476,18 @@ def main():
         sft_examples = torch.load(cache_path)
     else:
         sft_examples = generate_sft_data(cfg, num_examples=args.num_examples)
+
+        # Expand terse open-ended answers via LLM
+        if not args.skip_expansion:
+            sft_examples = asyncio.run(expand_terse_answers(sft_examples))
+
+            # Show some expanded examples
+            print("\nSample expanded answers:")
+            for ex in sft_examples[:5]:
+                print(f"  Q: {ex['question'][:60]}...")
+                print(f"  A: {ex['answer'][:100]}...")
+                print()
+
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(sft_examples, cache_path)
         print(f"Saved {len(sft_examples)} SFT examples to {cache_path}")
@@ -386,6 +497,18 @@ def main():
     print(f"{'='*60}")
 
     sft_checkpoint = train_sft(cfg, sft_examples, num_steps=args.num_steps)
+
+    # Push to Hub if requested
+    if args.push_to_hub:
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+        print(f"\nPushing to HuggingFace Hub: {args.push_to_hub}")
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_name, torch_dtype=torch.bfloat16, device_map="cpu",
+        )
+        model = PeftModel.from_pretrained(model, str(sft_checkpoint))
+        model.push_to_hub(args.push_to_hub)
+        print(f"Pushed to {args.push_to_hub}")
 
     print(f"\n{'='*60}")
     print(f"SFT complete! Checkpoint saved to: {sft_checkpoint}")

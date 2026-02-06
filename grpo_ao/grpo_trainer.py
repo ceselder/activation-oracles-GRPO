@@ -197,6 +197,14 @@ class GRPOTrainer:
         # Load dataset
         print("Loading WildChat oracle questions dataset...")
         self.dataset = load_dataset("ceselder/wildchat-oracle-questions-1k", split="train")
+        # Strip "ANSWER ONLY WITH YES OR NO" from questions - we want the model to elaborate
+        def _clean_questions(example):
+            example["oracle_questions"] = [
+                q.replace(" ANSWER ONLY WITH YES OR NO", "").replace("ANSWER ONLY WITH YES OR NO", "").strip()
+                for q in example["oracle_questions"]
+            ]
+            return example
+        self.dataset = self.dataset.map(_clean_questions)
         print(f"Loaded {len(self.dataset)} examples")
 
         print("Setup complete!")
@@ -259,9 +267,9 @@ class GRPOTrainer:
             encoded = self.tokenizer.apply_chat_template(
                 messages, tokenize=True, add_generation_prompt=True, return_tensors=None
             )
-        # Handle different return types
-        if hasattr(encoded, 'input_ids'):
-            input_ids_list = encoded.input_ids
+        # Handle different return types (transformers 5.x returns BatchEncoding)
+        if hasattr(encoded, 'keys'):
+            input_ids_list = encoded["input_ids"]
         elif isinstance(encoded, list):
             input_ids_list = encoded
         else:
@@ -345,7 +353,7 @@ class GRPOTrainer:
                     messages, tokenize=True, add_generation_prompt=True, return_tensors=None
                 )
 
-            input_ids_list = encoded.input_ids if hasattr(encoded, 'input_ids') else list(encoded)
+            input_ids_list = encoded["input_ids"] if hasattr(encoded, 'keys') else list(encoded)
             input_lengths.append(len(input_ids_list))
 
             special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]
@@ -359,21 +367,27 @@ class GRPOTrainer:
                 all_vectors.append(steering_vectors)
                 all_positions.append(positions)
 
-        # Pad to same length
+        # LEFT-pad to same length (required for decoder-only generation)
         max_len = max(len(ids) for ids in all_input_ids)
         padded_input_ids = []
         for ids in all_input_ids:
             padding = [self.tokenizer.pad_token_id] * (max_len - len(ids))
-            padded_input_ids.append(ids + padding)
+            padded_input_ids.append(padding + ids)
 
         batched_input_ids = torch.tensor(padded_input_ids, device=self.device)  # [N*G, max_len]
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = (batched_input_ids != self.tokenizer.pad_token_id).long()
 
+        # Adjust positions for left-padding offset
+        adjusted_positions = []
+        for k, ids in enumerate(all_input_ids):
+            pad_len = max_len - len(ids)
+            adjusted_positions.append([p + pad_len for p in all_positions[k]])
+
         hook_fn = get_hf_activation_steering_hook(
             vectors=all_vectors,
-            positions=all_positions,
+            positions=adjusted_positions,
             steering_coefficient=1.0,
             device=self.device,
             dtype=self.dtype,
@@ -706,6 +720,23 @@ class GRPOTrainer:
             r = compute_reward(p, j.informativeness, self.cfg.calibration_lambda)
             rewards.append(r)
 
+        # Confidence entropy bonus: reward generations whose confidence differs from group mode
+        # This breaks the "always pick 7" equilibrium by making diversity profitable
+        if self.cfg.confidence_entropy_bonus > 0:
+            confs = [r.confidence for r in rewards if r.parse_success]
+            if len(confs) >= 2:
+                from collections import Counter
+                conf_counts = Counter(confs)
+                n = len(confs)
+                # Each response gets bonus proportional to how rare its confidence is
+                # Rare confidence = high bonus, modal confidence = low bonus
+                for r in rewards:
+                    if r.parse_success:
+                        freq = conf_counts[r.confidence] / n
+                        # bonus = entropy_coeff * (1 - freq), so unique conf gets ~full bonus
+                        bonus = self.cfg.confidence_entropy_bonus * (1.0 - freq)
+                        r.reward += bonus
+
         reward_vals = [r.reward for r in rewards]
         mean_reward = sum(reward_vals) / len(reward_vals)
         std_reward = (sum((r - mean_reward)**2 for r in reward_vals) / len(reward_vals)) ** 0.5
@@ -730,6 +761,8 @@ class GRPOTrainer:
         scaled_loss.backward()
 
         # Metrics
+        conf_vals = [r.confidence for r in rewards if r.parse_success]
+        n_unique_confs = len(set(conf_vals)) if conf_vals else 0
         metrics = {
             "loss": loss.item(),
             "mean_reward": mean_reward,
@@ -738,6 +771,7 @@ class GRPOTrainer:
             "mean_informativeness": sum(r.informativeness for r in rewards) / len(rewards),
             "mean_brier": sum(r.brier_score for r in rewards) / len(rewards),
             "advantage_std": (sum(a**2 for a in advantages) / len(advantages)) ** 0.5,
+            "n_unique_confidences": n_unique_confs,
             **loss_metrics,  # mean_kl, max_log_ratio, clipfrac
         }
 
@@ -831,7 +865,7 @@ class GRPOTrainer:
                     encoded = self.tokenizer.apply_chat_template(
                         messages, tokenize=True, add_generation_prompt=True, return_tensors=None
                     )
-                input_ids_list = encoded.input_ids if hasattr(encoded, 'input_ids') else list(encoded)
+                input_ids_list = encoded["input_ids"] if hasattr(encoded, 'keys') else list(encoded)
                 input_ids = torch.tensor([input_ids_list], device=self.device)
 
                 special_token_id = self.tokenizer.encode(SPECIAL_TOKEN, add_special_tokens=False)[0]

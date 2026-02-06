@@ -51,8 +51,8 @@ def main():
                         help="Disable pushing to HuggingFace Hub")
     parser.add_argument("--hub_repo_id", type=str, default="ceselder/grpo-activation-oracle-qwen3-8b",
                         help="HuggingFace Hub repo ID")
-    parser.add_argument("--no_compile", action="store_true",
-                        help="Disable torch.compile (use if hooks break)")
+    parser.add_argument("--compile", action="store_true", default=False,
+                        help="Enable torch.compile (usually breaks with steering hooks)")
 
     args = parser.parse_args()
 
@@ -71,7 +71,7 @@ def main():
         eval_at_checkpoints=not args.no_eval,
         push_to_hub=not args.no_push,
         hub_repo_id=args.hub_repo_id,
-        use_torch_compile=not args.no_compile,
+        use_torch_compile=args.compile,
     )
 
     print("=" * 60)

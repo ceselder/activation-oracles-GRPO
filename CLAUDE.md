@@ -21,7 +21,11 @@ Where X is 0-10 (not 0-100). The confidence is normalized to 0-1 for Brier score
 
 ## Current Config
 - Model: Qwen/Qwen3-8B + LoRA
-- Oracle LoRA: `adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B`
+- Oracle LoRA (SFT-finetuned): `ceselder/qwen3-8b-oracle-sft-format`
+  - This is the base oracle further trained with SFT to learn the `[epistemic status: X]` format
+  - Requires system prompt (ORACLE_SYSTEM_PROMPT) to produce the format
+  - `ceselder/activation-oracle-sft-epistemic` does NOT work (undertrained, 200 steps)
+  - Without SFT checkpoint, the oracle outputs raw answers and gets 100% parse failures
 - Generations: 8 per example
 - Judge: GLM-4.7-flash via OpenRouter
 - Reward: `informativeness - λ * (confidence/10 - informativeness)²`
@@ -29,22 +33,42 @@ Where X is 0-10 (not 0-100). The confidence is normalized to 0-1 for Brier score
 - torch.compile: Enabled by default (use `--no_compile` if hooks break)
 
 ## Training on Remote GPU
+
+### Quick setup (one command)
 ```bash
-# SSH to vast.ai server
-ssh -p PORT root@IP
-
-# Sync code
-rsync -avz --exclude '.git' --exclude '__pycache__' --exclude 'wandb' -e "ssh -p PORT" . root@IP:/root/GRPO-activation-oracles/
-
-# Vibes check first
-python observe_rollout.py --num_examples 5 --num_generations 8
-
-# Start training
-nohup python3 train.py > train.log 2>&1 &
-
-# Monitor
-tail -f train.log
+bash setup_remote.sh ssh1.vast.ai PORT
 ```
+This syncs code, installs deps, verifies imports, and checks the GPU.
+
+### Manual steps (if needed)
+```bash
+# 1. Sync code (nl_probes is vendored - no extra repos needed)
+rsync -avz --exclude '.git' --exclude '__pycache__' --exclude 'wandb' --exclude '*.pyc' --exclude '.mypy_cache' \
+  -e "ssh -o StrictHostKeyChecking=no -p PORT" . root@HOST:/root/GRPO-activation-oracles/
+
+# 2. Install deps (just pip packages, no editable installs needed)
+ssh -o StrictHostKeyChecking=no -p PORT root@HOST \
+  "pip install -q torch transformers peft datasets openai httpx nest-asyncio wandb tqdm huggingface_hub pydantic"
+
+# 3. Vibes check (run in background, model download takes ~5min first time)
+ssh -o StrictHostKeyChecking=no -p PORT root@HOST \
+  "cd /root/GRPO-activation-oracles && nohup python3 observe_rollout.py --num_examples 2 --num_generations 4 > vibes.log 2>&1 &"
+# Monitor: ssh ... "tail -f /root/vibes.log"
+
+# 4. Start training
+ssh -o StrictHostKeyChecking=no -p PORT root@HOST \
+  "cd /root/GRPO-activation-oracles && nohup python3 train.py --no_eval > train.log 2>&1 &"
+# Monitor: ssh ... "tail -f /root/GRPO-activation-oracles/train.log"
+```
+
+### Important notes for Claude Code
+- **nl_probes is vendored** in `nl_probes/` - no need to clone/install the activation_oracles repo
+- **Never** run `pip install -e .` on the activation_oracles repo - it pulls in vllm/flash-attn/ray and will crash the server
+- Use `--no_eval` for training unless the full nl_probes package is installed (classification datasets need it)
+- First `import torch` on a fresh server takes ~30-60s, be patient with SSH commands
+- Use `-o StrictHostKeyChecking=no` for SSH to avoid host key issues on fresh VMs
+- Run long commands via `nohup ... &` and monitor with `tail -f` to avoid SSH timeout kills
+- The `.env` file must exist with HF_TOKEN, WANDB_API_KEY, OPENROUTER_API_KEY
 
 ## Inference Speed Notes
 - HuggingFace `generate()` is slow (~3-10x slower than vLLM)
